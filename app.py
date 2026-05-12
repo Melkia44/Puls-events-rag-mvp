@@ -106,12 +106,72 @@ LLM = ChatMistralAI(
 # LOGIQUE MÉTIER
 # ============================================================================
 
+def _format_iso_date(iso_str: str) -> str:
+    """Convertit '2026-04-10T18:00:00Z' en '10 avril 2026 à 18h00'."""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        mois = ["", "janvier", "février", "mars", "avril", "mai", "juin",
+                "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+        date_part = f"{dt.day} {mois[dt.month]} {dt.year}"
+        if dt.hour or dt.minute:
+            date_part += f" à {dt.hour}h{dt.minute:02d}"
+        return date_part
+    except Exception:
+        return iso_str
+
+
+def _same_date(iso1: str, iso2: str) -> bool:
+    """True si les 2 ISO sont sur le même jour."""
+    try:
+        return iso1[:10] == iso2[:10]
+    except Exception:
+        return False
+
+
+def _format_event_with_metadata(doc) -> str:
+    """Formate un Document LangChain en bloc structuré pour le prompt RAG.
+
+    Au lieu de passer seulement page_content au LLM, on injecte les
+    métadonnées (titre, lieu, dates, URL) pour que Mistral puisse les citer.
+    Fix du problème "Date : Non précisée" observé en vague 1.
+    """
+    meta = doc.metadata or {}
+    lines = []
+
+    if meta.get("title"):
+        lines.append(f"Titre : {meta['title']}")
+    if meta.get("location"):
+        lines.append(f"Lieu : {meta['location']}")
+
+    start = meta.get("start_date")
+    end = meta.get("end_date")
+    if start:
+        start_fmt = _format_iso_date(start)
+        if end and end != start and not _same_date(start, end):
+            end_fmt = _format_iso_date(end)
+            lines.append(f"Du {start_fmt} au {end_fmt}")
+        else:
+            lines.append(f"Date : {start_fmt}")
+
+    content = (doc.page_content or "").strip()
+    if content:
+        lines.append(f"Description : {content}")
+
+    if meta.get("url"):
+        lines.append(f"Lien : {meta['url']}")
+
+    return "\n".join(lines)
+
+
 def rag_response(user_message: str, short_term: ShortTermMemory, user_id: int | None) -> str:
     if VECTOR_STORE is None or LLM is None:
         return "⚠️ Erreur de configuration. Vérifie MISTRAL_API_KEY et l'index FAISS."
 
     docs = VECTOR_STORE.similarity_search(user_message, k=RETRIEVER_K)
-    context = "\n\n---\n\n".join(d.page_content for d in docs)
+
+    # Formater chaque event avec ses métadonnées (titre, lieu, date, lien)
+    context = "\n\n---\n\n".join(_format_event_with_metadata(d) for d in docs)
 
     profile_block = ""
     if user_id and LTM is not None:
@@ -128,6 +188,8 @@ def rag_response(user_message: str, short_term: ShortTermMemory, user_id: int | 
 
     response = LLM.invoke(prompt)
     return response.content
+
+
 
 
 def trigger_preference_extraction(short_term: ShortTermMemory, user_id: int, session_id: int) -> int:
