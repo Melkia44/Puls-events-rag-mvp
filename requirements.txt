@@ -1,10 +1,11 @@
 # ============================================================================
 # Puls-Events MVP P13 - Vague 1 (D1 mémoire + RAG basique)
-# Cible : Hugging Face Spaces · Gradio SDK · Python 3.10+
+# Versions pinned pour compat HF Spaces (Python 3.12)
 # ============================================================================
 
 # UI
-gradio>=4.36.0
+gradio==6.14.0
+huggingface_hub>=0.23,<0.27
 
 # RAG core
 langchain>=0.3.0
