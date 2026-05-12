@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Environnements
+venv/
+.venv/
+env/
+ENV/
+
+# Variables d'env (jamais committer)
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data (sauf index FAISS qui est tracké via LFS)
+*.db
+*.sqlite
+
+# Logs
+*.log
+venv/
+*.bak

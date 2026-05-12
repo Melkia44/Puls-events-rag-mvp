@@ -1,0 +1,20 @@
+# ============================================================================
+# Puls-Events MVP P13 - Vague 1 (D1 mémoire + RAG basique)
+# Cible : Hugging Face Spaces · Gradio SDK · Python 3.10+
+# ============================================================================
+
+# UI
+gradio>=4.36.0
+
+# RAG core
+langchain>=0.3.0
+langchain-mistralai>=0.2.0
+langchain-community>=0.3.0
+faiss-cpu>=1.7.4
+
+# Persistance Postgres Supabase
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.9
+
+# Config
+python-dotenv>=1.0.0
