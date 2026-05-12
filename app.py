@@ -15,12 +15,15 @@ Pas encore dans cette version :
 Compatible : Gradio 4.x (HF Spaces SDK officiel, type="messages" depuis 4.36).
 
 ────────────────────────────────────────────────────────────────────────────
-Changelog UI (réponse audit UX du 05/2026) :
+Changelog UI (réponses aux audits UX du 05/2026) :
     P0.1 — Sidebar technique masquée derrière variable SHOW_DEBUG (12-factor)
     P0.2 — Titre produit "Puls · Événements Nantes Métropole" (plus de "MVP")
     P1.1 — Message d'accueil pré-chargé + 4 chips de suggestion
     P1.2 — Panneau Sources replié sous chaque réponse (traçabilité RAG)
     P2   — Footer dynamique exposant l'état D1 (mémoire + profil actif)
+    P3   — Mock d'authentification explicité (cf. R-AUTH-01 dans backlog)
+           La sélection libre de profil est désormais labellisée "Mode démo"
+           avec disclaimer sur la future intégration Supabase Auth (US-801)
 ────────────────────────────────────────────────────────────────────────────
 """
 
@@ -324,7 +327,7 @@ def respond(
         return "", chat_history, short_term
 
     if not user_state or "id" not in user_state:
-        warning = "⚠️ Sélectionne d'abord un utilisateur dans la barre latérale."
+        warning = "⚠️ Active d'abord un profil de démonstration dans la barre latérale."
         chat_history = chat_history + [
             {"role": "user", "content": message},
             {"role": "assistant", "content": warning},
@@ -372,7 +375,7 @@ WELCOME_MESSAGE = [{
         "Je peux t'aider à découvrir concerts, expos, spectacles et festivals "
         "près de chez toi. Si tu actives un profil à gauche, je me souviendrai "
         "de tes goûts entre deux conversations.\n\n"
-        "_Sélectionne un profil utilisateur, puis pose-moi ta question — "
+        "_Active un profil de démonstration, puis pose-moi ta question — "
         "ou clique sur une suggestion ci-dessous._ ↓"
     ),
 }]
@@ -447,25 +450,38 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements Nantes Métropole")
     session_state = gr.State({})
 
     with gr.Row():
-        # ────────── Colonne gauche : profil utilisateur (D1) ──────────
+        # ────────── Colonne gauche : mock d'authentification (D1) ──────────
+        # IMPORTANT : ce bloc simule une authentification pour la démonstration.
+        # En production, la sélection de profil sera remplacée par Supabase Auth
+        # (magic link email + JWT). Cette limitation est tracée dans le backlog
+        # sous la référence R-AUTH-01 et l'US de résolution US-801.
         with gr.Column(scale=1):
-            gr.Markdown("### 👤 Utilisateur")
+            gr.Markdown("### 🔧 Mode démo — Simulation utilisateur")
+            gr.Markdown(
+                "<small style='opacity:0.7;line-height:1.4;display:block;"
+                "padding:0.3em 0 0.7em;'>"
+                "En production, cette zone serait remplacée par une "
+                "authentification <b>Supabase Auth</b> (magic link email). "
+                "Pour la démonstration, choisis ou crée un profil ci-dessous "
+                "pour activer la mémoire conversationnelle <i>(défi D1)</i>."
+                "</small>",
+            )
 
             user_dropdown = gr.Dropdown(
                 choices=get_user_list(),
-                label="Choisir un profil existant",
+                label="Profil de démonstration",
                 interactive=True,
                 allow_custom_value=True,
             )
 
             new_user_input = gr.Textbox(
-                label="…ou créer un nouveau profil",
+                label="…ou créer un profil de test",
                 placeholder="Ex: Léa, Thomas, …",
             )
 
-            select_btn = gr.Button("Activer ce profil", variant="primary")
+            select_btn = gr.Button("Simuler la connexion", variant="primary")
 
-            profile_display = gr.Markdown("_Aucun utilisateur actif._")
+            profile_display = gr.Markdown("_Aucun profil actif._")
 
             new_conv_btn = gr.Button("🔄 Nouvelle conversation", variant="secondary")
 
