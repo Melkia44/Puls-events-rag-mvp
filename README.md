@@ -4,8 +4,8 @@ emoji: 🎭
 colorFrom: indigo
 colorTo: pink
 sdk: gradio
-sdk_version: 4.44.0
-python_version: 3.12
+sdk_version: 5.34.0
+python_version: "3.12"
 app_file: app.py
 pinned: false
 license: mit

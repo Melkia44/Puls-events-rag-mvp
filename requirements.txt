@@ -4,7 +4,7 @@
 # ============================================================================
 
 # UI - laissons HF Spaces gérer la version exacte
-gradio>=4.44.0,<5.0.0
+gradio>=5.0,<6.0
 
 # RAG core
 langchain>=0.3.0
