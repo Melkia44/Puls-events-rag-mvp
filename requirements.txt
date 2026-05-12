@@ -1,11 +1,10 @@
 # ============================================================================
 # Puls-Events MVP P13 - Vague 1 (D1 mémoire + RAG basique)
-# Versions pinned pour compat HF Spaces (Python 3.12)
+# Gradio 4.x pour compat native HF Spaces
 # ============================================================================
 
-# UI
-gradio==6.14.0
-huggingface_hub>=0.23,<0.27
+# UI - laissons HF Spaces gérer la version exacte
+gradio>=4.36.0,<5.0.0
 
 # RAG core
 langchain>=0.3.0

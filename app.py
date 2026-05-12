@@ -11,6 +11,8 @@ Pas encore dans cette version :
     - D2 géo (vague 2)
     - D3 agent web (vague 3)
     - D4 monitoring Langfuse (vague 3)
+
+Compatible : Gradio 4.x (HF Spaces SDK officiel).
 """
 
 from __future__ import annotations
@@ -22,11 +24,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Chemin absolu vers le .env : à côté de app.py, quel que soit le CWD
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH, verbose=True)
 
-# Sanity check immédiat (sans crash, juste avertissement)
 if not os.getenv("MISTRAL_API_KEY"):
     print(f"⚠️  .env non chargé ou MISTRAL_API_KEY manquant. Chemin tenté : {_ENV_PATH}")
     print(f"    .env existe ? {_ENV_PATH.exists()}")
@@ -64,7 +64,7 @@ logger.info(f"Gradio version : {gr.__version__}")
 
 
 # ============================================================================
-# STARTUP — chargement singletons (une seule fois au démarrage)
+# STARTUP — chargement singletons
 # ============================================================================
 
 config_errors = validate_config()
@@ -74,7 +74,6 @@ if config_errors:
         logger.error(f"  - {err}")
     logger.error("Vérifie tes variables d'environnement (.env local ou Secrets HF)")
 
-# Vector store
 logger.info("Chargement du vector store FAISS…")
 try:
     VECTOR_STORE = load_vector_store(
@@ -87,7 +86,6 @@ except Exception as e:
     logger.error(f"Échec chargement vector store : {e}")
     VECTOR_STORE = None
 
-# Long-term memory (Supabase)
 logger.info("Connexion à Supabase Postgres…")
 try:
     LTM = LongTermMemory(database_url=DATABASE_URL)
@@ -96,7 +94,6 @@ except Exception as e:
     logger.error(f"Échec connexion Supabase : {e}")
     LTM = None
 
-# LLM principal
 logger.info("Initialisation LLM Mistral…")
 LLM = ChatMistralAI(
     api_key=MISTRAL_API_KEY,
@@ -109,12 +106,7 @@ LLM = ChatMistralAI(
 # LOGIQUE MÉTIER
 # ============================================================================
 
-def rag_response(
-    user_message: str,
-    short_term: ShortTermMemory,
-    user_id: int | None,
-) -> str:
-    """Pipeline RAG simple : retrieval + prompt + génération."""
+def rag_response(user_message: str, short_term: ShortTermMemory, user_id: int | None) -> str:
     if VECTOR_STORE is None or LLM is None:
         return "⚠️ Erreur de configuration. Vérifie MISTRAL_API_KEY et l'index FAISS."
 
@@ -138,12 +130,7 @@ def rag_response(
     return response.content
 
 
-def trigger_preference_extraction(
-    short_term: ShortTermMemory,
-    user_id: int,
-    session_id: int,
-) -> int:
-    """Extrait les préférences depuis l'historique et les persiste."""
+def trigger_preference_extraction(short_term: ShortTermMemory, user_id: int, session_id: int) -> int:
     if LTM is None or not MISTRAL_API_KEY:
         return 0
 
@@ -175,7 +162,7 @@ def trigger_preference_extraction(
 
 
 # ============================================================================
-# UI GRADIO 6.x (format messages OpenAI-style)
+# UI GRADIO 4.x (format messages OpenAI-style supporté depuis 4.x)
 # ============================================================================
 
 def get_user_list() -> List[str]:
@@ -216,11 +203,6 @@ def respond(
     user_state: Dict,
     session_state: Dict,
 ) -> Tuple[str, List[Dict], ShortTermMemory]:
-    """
-    Handler du chat — format Gradio 6.x messages OpenAI-style.
-
-    chat_history est une liste de {"role": "user|assistant", "content": "..."}
-    """
     if not message or not message.strip():
         return "", chat_history, short_term
 
@@ -241,7 +223,6 @@ def respond(
         logger.error(f"Erreur RAG : {e}")
         response = f"⚠️ Erreur lors de la génération : {str(e)[:200]}"
 
-    # Update mémoires
     short_term.add_turn(message, response)
     if LTM is not None and session_id:
         try:
@@ -262,7 +243,6 @@ def new_conversation(
     user_state: Dict,
     session_state: Dict,
 ) -> Tuple[List[Dict], ShortTermMemory, Dict, str]:
-    """Termine la session : extrait prefs, persiste, démarre nouvelle session, clear UI."""
     if not user_state or "id" not in user_state:
         return [], ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), {}, "Pas d'utilisateur actif."
 
@@ -289,7 +269,7 @@ def new_conversation(
 
 
 # ============================================================================
-# BUILD UI (Gradio 6.x compat)
+# BUILD UI (Gradio 4.x — theme dans Blocks())
 # ============================================================================
 
 PULS_THEME = gr.themes.Soft(
@@ -297,7 +277,7 @@ PULS_THEME = gr.themes.Soft(
     secondary_hue="indigo",
 )
 
-with gr.Blocks(title="Puls-Events MVP") as demo:
+with gr.Blocks(theme=PULS_THEME, title="Puls-Events MVP") as demo:
     gr.Markdown("# 🎭 Puls-Events MVP")
     gr.Markdown("_Assistant culturel conversationnel avec mémoire personnalisée_")
 
@@ -338,6 +318,7 @@ with gr.Blocks(title="Puls-Events MVP") as demo:
             chatbot = gr.Chatbot(
                 label="Conversation",
                 height=500,
+                type="messages",  # format OpenAI-style supporté depuis Gradio 4.36
             )
 
             with gr.Row():
@@ -348,7 +329,6 @@ with gr.Blocks(title="Puls-Events MVP") as demo:
                 )
                 send_btn = gr.Button("Envoyer", variant="primary", scale=1)
 
-    # Handlers
     def on_select(existing_dropdown: str, new_name: str):
         name = new_name.strip() if new_name and new_name.strip() else existing_dropdown
         user_s, sess_s, profile = select_user(name)
@@ -380,9 +360,8 @@ with gr.Blocks(title="Puls-Events MVP") as demo:
 
 
 if __name__ == "__main__":
-    # Gradio 6.x : theme passé en launch() au lieu de Blocks()
+    # Gradio 4.x : theme dans Blocks(), pas dans launch()
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
-        theme=PULS_THEME,
     )
