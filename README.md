@@ -8,7 +8,7 @@ sdk_version: 4.36.0
 app_file: app.py
 pinned: false
 license: mit
-short_description: Assistant conversationnel de découverte d'événements culturels
+short_description: Chatbot RAG de découverte d'événements culturels
 ---
 
 # 🎭 Puls-Events MVP
