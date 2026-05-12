@@ -1,6 +1,6 @@
 """
 app.py
-Puls-Events MVP P13 - Interface Gradio.
+Puls-Events MVP P13 — Interface Gradio.
 
 Vague 1 : RAG basique + mémoire conversationnelle D1
     - Court terme : buffer fenêtré injecté dans prompt
@@ -12,7 +12,16 @@ Pas encore dans cette version :
     - D3 agent web (vague 3)
     - D4 monitoring Langfuse (vague 3)
 
-Compatible : Gradio 4.x (HF Spaces SDK officiel).
+Compatible : Gradio 4.x (HF Spaces SDK officiel, type="messages" depuis 4.36).
+
+────────────────────────────────────────────────────────────────────────────
+Changelog UI (réponse audit UX du 05/2026) :
+    P0.1 — Sidebar technique masquée derrière variable SHOW_DEBUG (12-factor)
+    P0.2 — Titre produit "Puls · Événements Nantes Métropole" (plus de "MVP")
+    P1.1 — Message d'accueil pré-chargé + 4 chips de suggestion
+    P1.2 — Panneau Sources replié sous chaque réponse (traçabilité RAG)
+    P2   — Footer dynamique exposant l'état D1 (mémoire + profil actif)
+────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -102,6 +111,13 @@ LLM = ChatMistralAI(
 ) if MISTRAL_API_KEY else None
 
 
+# Mode debug — flag global lu une fois au démarrage
+# Local : `SHOW_DEBUG=1 python app.py` pour exposer la stack technique
+# HF Spaces : variable non définie → mode produit propre
+SHOW_DEBUG = os.getenv("SHOW_DEBUG", "0") == "1"
+logger.info(f"Mode debug UI : {'activé' if SHOW_DEBUG else 'désactivé'}")
+
+
 # ============================================================================
 # LOGIQUE MÉTIER
 # ============================================================================
@@ -164,9 +180,50 @@ def _format_event_with_metadata(doc) -> str:
     return "\n".join(lines)
 
 
-def rag_response(user_message: str, short_term: ShortTermMemory, user_id: int | None) -> str:
+def _format_sources_html(docs) -> str:
+    """Construit un bloc <details> HTML rendant les sources RAG dépliables.
+
+    Argument jury : c'est la traçabilité d'un système RAG — preuve que les
+    réponses sont ancrées sur des données réelles OpenAgenda, pas hallucinées.
+    Le bloc est replié par défaut (clic utilisateur pour expansion) afin de
+    ne pas encombrer la lecture de la réponse principale.
+    """
+    if not docs:
+        return ""
+
+    items = []
+    for i, doc in enumerate(docs, 1):
+        meta = doc.metadata or {}
+        title = meta.get("title", f"Source {i}")
+        location = meta.get("location", "")
+        url = meta.get("url", "")
+        url_html = f' · <a href="{url}" target="_blank">Voir sur OpenAgenda</a>' if url else ""
+        loc_html = f" — <i>{location}</i>" if location else ""
+        items.append(f"<li><b>{title}</b>{loc_html}{url_html}</li>")
+
+    return (
+        "\n\n<details style='margin-top:0.5em;font-size:0.85em;opacity:0.85;'>"
+        f"<summary>📚 {len(docs)} sources consultées</summary>"
+        f"<ul style='margin-top:0.5em;'>{''.join(items)}</ul>"
+        "</details>"
+    )
+
+
+def rag_response(
+    user_message: str,
+    short_term: ShortTermMemory,
+    user_id: int | None,
+) -> Tuple[str, List]:
+    """Pipeline RAG : retrieval FAISS → prompt → Mistral.
+
+    Returns:
+        (texte_réponse_brute, documents_sources)
+        Le texte est SANS HTML pour la mémoire courte (pas de pollution du contexte
+        aux tours suivants). Les sources sont retournées séparément pour permettre
+        à l'appelant de construire un affichage enrichi côté UI.
+    """
     if VECTOR_STORE is None or LLM is None:
-        return "⚠️ Erreur de configuration. Vérifie MISTRAL_API_KEY et l'index FAISS."
+        return ("⚠️ Erreur de configuration. Vérifie MISTRAL_API_KEY et l'index FAISS.", [])
 
     docs = VECTOR_STORE.similarity_search(user_message, k=RETRIEVER_K)
 
@@ -187,9 +244,7 @@ def rag_response(user_message: str, short_term: ShortTermMemory, user_id: int | 
     )
 
     response = LLM.invoke(prompt)
-    return response.content
-
-
+    return (response.content, docs)
 
 
 def trigger_preference_extraction(short_term: ShortTermMemory, user_id: int, session_id: int) -> int:
@@ -224,7 +279,7 @@ def trigger_preference_extraction(short_term: ShortTermMemory, user_id: int, ses
 
 
 # ============================================================================
-# UI GRADIO 4.x (format messages OpenAI-style supporté depuis 4.x)
+# UI GRADIO 4.x (format messages OpenAI-style supporté depuis 4.36)
 # ============================================================================
 
 def get_user_list() -> List[str]:
@@ -279,13 +334,20 @@ def respond(
     user_id = user_state["id"]
     session_id = session_state.get("id") if session_state else None
 
+    # Appel RAG : on récupère réponse brute + documents sources séparément
+    # pour pouvoir stocker la version "propre" en mémoire courte et afficher
+    # la version "enrichie HTML" côté chat
     try:
-        response = rag_response(message, short_term, user_id)
+        response, sources = rag_response(message, short_term, user_id)
+        response_with_sources = response + _format_sources_html(sources)
     except Exception as e:
         logger.error(f"Erreur RAG : {e}")
         response = f"⚠️ Erreur lors de la génération : {str(e)[:200]}"
+        response_with_sources = response  # pas de sources en cas d'erreur
 
+    # Mémoire courte = réponse SANS HTML (sinon pollue le contexte au tour suivant)
     short_term.add_turn(message, response)
+
     if LTM is not None and session_id:
         try:
             LTM.log_message(session_id, "user", message)
@@ -293,11 +355,27 @@ def respond(
         except Exception as e:
             logger.warning(f"Échec log message : {e}")
 
+    # Affichage chat = réponse AVEC bloc sources repliable
     chat_history = chat_history + [
         {"role": "user", "content": message},
-        {"role": "assistant", "content": response},
+        {"role": "assistant", "content": response_with_sources},
     ]
     return "", chat_history, short_term
+
+
+# Message d'accueil pré-chargé dans le chat — supprime la page blanche
+# au premier contact (réponse audit UX point #2 critique)
+WELCOME_MESSAGE = [{
+    "role": "assistant",
+    "content": (
+        "Bonjour ! Je suis **Puls**, ton assistant culturel pour Nantes Métropole.\n\n"
+        "Je peux t'aider à découvrir concerts, expos, spectacles et festivals "
+        "près de chez toi. Si tu actives un profil à gauche, je me souviendrai "
+        "de tes goûts entre deux conversations.\n\n"
+        "_Sélectionne un profil utilisateur, puis pose-moi ta question — "
+        "ou clique sur une suggestion ci-dessous._ ↓"
+    ),
+}]
 
 
 def new_conversation(
@@ -306,7 +384,8 @@ def new_conversation(
     session_state: Dict,
 ) -> Tuple[List[Dict], ShortTermMemory, Dict, str]:
     if not user_state or "id" not in user_state:
-        return [], ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), {}, "Pas d'utilisateur actif."
+        # Pas d'utilisateur actif : on reset mais on garde le message d'accueil
+        return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), {}, "Pas d'utilisateur actif."
 
     user_id = user_state["id"]
     old_session_id = session_state.get("id") if session_state else None
@@ -327,7 +406,27 @@ def new_conversation(
     if n_extracted > 0:
         info += f" {n_extracted} préférence(s) extraite(s) de la précédente session."
 
-    return [], ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), new_state, profile_display + f"\n\n{info}"
+    # On reset le chat avec le message d'accueil + on conserve le résumé profil
+    return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), new_state, profile_display + f"\n\n{info}"
+
+
+def _status_line(user_state: Dict) -> str:
+    """Footer minimaliste — affiche en permanence l'état D1 (mémoire + profil).
+
+    Argument jury : rend visible la mémoire conversationnelle (défi #1) sans
+    exposer la stack technique. L'utilisateur voit son profil actif, le jury
+    voit que D1 tourne.
+    """
+    name = user_state.get("name", "—") if user_state else "—"
+    return (
+        f"<div style='text-align:center;font-size:0.78em;opacity:0.6;"
+        f"padding:0.5em 0;border-top:1px solid rgba(255,255,255,0.05);"
+        f"margin-top:1em;'>"
+        f"Profil actif : <b>{name}</b> · "
+        f"Mémoire conversationnelle active · "
+        f"Données OpenAgenda · Nantes Métropole"
+        f"</div>"
+    )
 
 
 # ============================================================================
@@ -339,17 +438,18 @@ PULS_THEME = gr.themes.Soft(
     secondary_hue="indigo",
 )
 
-with gr.Blocks(theme=PULS_THEME, title="Puls-Events MVP") as demo:
-    gr.Markdown("# 🎭 Puls-Events MVP")
-    gr.Markdown("_Assistant culturel conversationnel avec mémoire personnalisée_")
+with gr.Blocks(theme=PULS_THEME, title="Puls · Événements Nantes Métropole") as demo:
+    gr.Markdown("# 🎭 Puls · Événements Nantes Métropole")
+    gr.Markdown("_Votre guide culturel conversationnel — propulsé par l'IA et OpenAgenda_")
 
     short_term_state = gr.State(ShortTermMemory(window_size=MEMORY_WINDOW_SIZE))
     user_state = gr.State({})
     session_state = gr.State({})
 
     with gr.Row():
+        # ────────── Colonne gauche : profil utilisateur (D1) ──────────
         with gr.Column(scale=1):
-            gr.Markdown("### 👤 Utilisateur (D1 mémoire)")
+            gr.Markdown("### 👤 Utilisateur")
 
             user_dropdown = gr.Dropdown(
                 choices=get_user_list(),
@@ -369,27 +469,58 @@ with gr.Blocks(theme=PULS_THEME, title="Puls-Events MVP") as demo:
 
             new_conv_btn = gr.Button("🔄 Nouvelle conversation", variant="secondary")
 
-            gr.Markdown("---")
-            gr.Markdown(
-                f"**Modèle** : `{CHAT_MODEL}`\n\n"
-                f"**Mémoire courte** : {MEMORY_WINDOW_SIZE} tours\n\n"
-                f"**Index** : `{FAISS_INDEX_PATH}`",
-            )
+            # ─── Bloc technique réservé au mode debug ───
+            # En prod : invisible pour l'utilisateur final
+            # En démo soutenance : SHOW_DEBUG=1 pour montrer la transparence
+            # technique au jury (conformité 12-factor app)
+            if SHOW_DEBUG:
+                gr.Markdown("---")
+                gr.Markdown(
+                    f"**Modèle** : `{CHAT_MODEL}`\n\n"
+                    f"**Mémoire courte** : {MEMORY_WINDOW_SIZE} tours\n\n"
+                    f"**Index** : `{FAISS_INDEX_PATH}`",
+                    elem_id="debug-panel",
+                )
 
+        # ────────── Colonne droite : conversation ──────────
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
                 label="Conversation",
                 height=500,
-                type="messages",  # format OpenAI-style supporté depuis Gradio 4.36
+                type="messages",       # format OpenAI-style depuis Gradio 4.36
+                value=WELCOME_MESSAGE,  # pré-rempli au chargement (anti page blanche)
             )
 
-            with gr.Row():
-                msg_input = gr.Textbox(
-                    placeholder="Pose ta question sur les événements culturels…",
-                    scale=4,
-                    show_label=False,
-                )
-                send_btn = gr.Button("Envoyer", variant="primary", scale=1)
+            # Définition du textbox AVANT gr.Examples (qui le référence en inputs)
+            msg_input = gr.Textbox(
+                placeholder="Pose ta question sur les événements culturels…",
+                show_label=False,
+            )
+
+            # 4 chips de suggestion — chacune démontre une capacité différente :
+            #   - événements généraux (RAG de base)
+            #   - mémoire conversationnelle (D1)
+            #   - personnalisation (profil long terme)
+            #   - filtrage thématique
+            gr.Examples(
+                examples=[
+                    ["Quels événements culturels ce week-end à Nantes ?"],
+                    ["Tu te souviens de ce que j'aime ?"],
+                    ["Recommande-moi un spectacle pour ce soir"],
+                    ["Y a-t-il des expositions gratuites en ce moment ?"],
+                ],
+                inputs=[msg_input],
+                label="💡 Suggestions",
+            )
+
+            send_btn = gr.Button("Envoyer", variant="primary")
+
+    # ────────── Footer dynamique ──────────
+    # Affiche en permanence l'état D1 (profil + mémoire active)
+    # Se met à jour automatiquement quand user_state change
+    status_md = gr.Markdown(_status_line({}))
+
+    # ────────── Wiring des événements ──────────
 
     def on_select(existing_dropdown: str, new_name: str):
         name = new_name.strip() if new_name and new_name.strip() else existing_dropdown
@@ -418,6 +549,13 @@ with gr.Blocks(theme=PULS_THEME, title="Puls-Events MVP") as demo:
         fn=new_conversation,
         inputs=[short_term_state, user_state, session_state],
         outputs=[chatbot, short_term_state, session_state, profile_display],
+    )
+
+    # Mise à jour du footer dès qu'un utilisateur est activé ou changé
+    user_state.change(
+        fn=_status_line,
+        inputs=[user_state],
+        outputs=[status_md],
     )
 
 
