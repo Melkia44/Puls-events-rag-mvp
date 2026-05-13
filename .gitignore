@@ -34,3 +34,4 @@ Thumbs.db
 *.log
 venv/
 *.bak
+data/geocoding_cache.db

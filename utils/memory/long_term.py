@@ -6,6 +6,13 @@ Stocke utilisateurs, sessions, messages, préférences extraites.
 Persisté entre sessions Gradio pour démontrer la mémoire continue.
 
 Defi P13 D1 — niveau 2/2.
+
+────────────────────────────────────────────────────────────────────────────
+Changelog :
+    [D2] Ajout des colonnes city / city_lat / city_lng dans la table users
+         pour persister la position de l'utilisateur entre sessions.
+         Migration faite via ALTER TABLE idempotent au démarrage (Postgres-only).
+────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -15,8 +22,8 @@ from typing import List, Optional, Dict, Any
 from contextlib import contextmanager
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, DateTime, ForeignKey,
-    UniqueConstraint, Index,
+    create_engine, Column, Integer, String, Text, DateTime, Float, ForeignKey,
+    UniqueConstraint, Index, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
@@ -35,6 +42,12 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(80), unique=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # [D2] Position utilisateur — saisie au profil, géocodée une fois
+    # Nullable : un utilisateur peut exister sans ville renseignée
+    city = Column(String(120), nullable=True)
+    city_lat = Column(Float, nullable=True)
+    city_lng = Column(Float, nullable=True)
 
     sessions = relationship(
         "ConversationSession", back_populates="user",
@@ -122,9 +135,37 @@ class LongTermMemory:
         Base.metadata.create_all(self.engine)
         logger.info("Schéma DB vérifié/créé sur Supabase")
 
+        # [D2] Migration idempotente — ajoute les colonnes ville si absentes
+        # Postgres-spécifique (ADD COLUMN IF NOT EXISTS). SQLAlchemy ne fait
+        # pas d'ALTER TABLE automatique, c'est une limite connue hors Alembic.
+        # Coût démarrage : 3 requêtes catalogue Postgres = négligeable.
+        self._migrate_user_geo_columns()
+
         self.SessionLocal = sessionmaker(
             bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False,
         )
+
+    def _migrate_user_geo_columns(self) -> None:
+        """Ajoute les colonnes city/city_lat/city_lng à users si elles manquent.
+
+        Postgres 9.6+ supporte ADD COLUMN IF NOT EXISTS, donc l'opération
+        est strictement idempotente et sans risque.
+        """
+        migrations = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS city VARCHAR(120)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS city_lat DOUBLE PRECISION",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS city_lng DOUBLE PRECISION",
+        ]
+        try:
+            with self.engine.begin() as conn:
+                for sql in migrations:
+                    conn.execute(text(sql))
+            logger.info("Migration colonnes géo users : OK (idempotent)")
+        except Exception as e:
+            logger.error(f"Échec migration colonnes géo users : {e}")
+            # On ne lève pas : si la migration échoue, l'app peut tourner
+            # en dégradé (D1 ok, D2 inactif). Les setters/getters géo
+            # géreront le cas "colonne absente" en levant proprement.
 
     @contextmanager
     def _session(self) -> Session:
@@ -156,6 +197,41 @@ class LongTermMemory:
                 "id": u.id, "name": u.name,
                 "created_at": u.created_at.isoformat(),
             } for u in users]
+
+    # --- [D2] Géolocalisation utilisateur ---
+
+    def set_user_city(
+        self, user_id: int, city: str, lat: float, lng: float,
+    ) -> None:
+        """Persiste la ville et ses coordonnées géocodées pour un utilisateur.
+
+        Args:
+            user_id: identifiant interne
+            city: nom de ville saisi par l'utilisateur (conservé tel quel pour
+                l'affichage UI, pas normalisé)
+            lat, lng: coordonnées issues du géocodage Nominatim
+        """
+        with self._session() as s:
+            user = s.get(User, user_id)
+            if user is None:
+                logger.warning(f"set_user_city : user_id={user_id} introuvable")
+                return
+            user.city = city
+            user.city_lat = lat
+            user.city_lng = lng
+            logger.info(f"Ville '{city}' enregistrée pour user_id={user_id}")
+
+    def get_user_city(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Retourne le dict {city, lat, lng} ou None si non renseigné."""
+        with self._session() as s:
+            user = s.get(User, user_id)
+            if user is None or user.city is None:
+                return None
+            return {
+                "city": user.city,
+                "lat": user.city_lat,
+                "lng": user.city_lng,
+            }
 
     # --- Sessions ---
 
