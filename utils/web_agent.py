@@ -397,13 +397,21 @@ def web_search_filtered(
 # ("complet" dans "incomplet"), mais le routeur LLM derrière filtre les cas
 # ambigus. C'est l'équilibre robustesse/précision pour une heuristique.
 _FORCE_WEB_TRIGGERS = [
-    r"billet",                       # billet, billets, billetterie
-    r"réserv",                       # réservation, réserver, réservations
-    r"annoncé",                      # annoncé, annoncée, annoncés
+    # ── Achat / réservation ──────────────────────────────
+    r"billet",                          # billet, billets, billetterie
+    r"réserv",                          # réservation, réserver, réservations
+    r"acheter\s+(?:des\s+|une?\s+)?(?:place|billet)",   # acheter des places/billets
+    r"où\s+(?:acheter|trouver)",        # où acheter, où trouver
+    r"prix\s+(?:du|de\s+la|des)\s+(?:billet|place|entrée)",  # prix du billet
+    # ── Disponibilité / état ─────────────────────────────
     r"encore disponible",
-    r"derni(?:ère|er)s? actu",       # dernière(s) actu, dernier(s) actu...
-    r"complet",                      # complet, complète
+    r"compl[eè]t",                      # complet, complets, complète, complètes
     r"ouverture\s+(?:de\s+)?la\s+billetterie",
+    # ── Actualité récente ────────────────────────────────
+    r"annonc(?:é|ée|és|ées|er|ent|e)",  # annonce(s), annoncé(s), annoncer, annoncent
+    r"actu(?:alité)?s?\s+récent",       # actu récente, actualités récentes
+    r"derni(?:ère|er)s?\s+(?:actu|news|nouvelle)",  # dernière actu, derniers news
+    r"prochain[se]?\s+(?:concert|spectacle|festival|événement|evenement)",
 ]
 _FORCE_WEB_REGEX = re.compile("|".join(_FORCE_WEB_TRIGGERS), re.IGNORECASE)
 
