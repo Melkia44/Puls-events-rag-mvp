@@ -1,0 +1,87 @@
+# config/domain_whitelist.yaml
+# ─────────────────────────────────────────────────────────────────────
+# Liste blanche des domaines autorisés pour l'agent web D3.
+#
+# Tout résultat retourné par Brave Search dont l'URL ne match aucun de
+# ces domaines est silencieusement filtré.
+#
+# Catégorie : utilisée pour le pictogramme d'affichage dans le panneau
+# Sources et pour la priorisation (presse locale > billetterie > national).
+#
+# Pour ajouter/retirer un domaine : modifier ce fichier et redémarrer
+# l'app. Aucun rebuild Docker nécessaire.
+#
+# Anti-patterns évités :
+#   - Pas de wildcards "*.fr" qui laisseraient passer n'importe quoi
+#   - Pas de sous-domaines vagues (boutique.exemple.fr OK, *.exemple.fr non)
+#   - Pas de réseaux sociaux (Twitter/X, Facebook) — qualité éditoriale
+#     trop variable, risque de faux billets
+#
+# Réf. backlog : US-603 (whitelist domaines), R-09 (dépendance smolagents)
+# ─────────────────────────────────────────────────────────────────────
+
+domains:
+
+  # ─── Presse locale et régionale ────────────────────────────
+  - domain: ouest-france.fr
+    category: presse
+    icon: "📰"
+    priority: 1
+
+  - domain: presse-ocean.fr
+    category: presse
+    icon: "📰"
+    priority: 1
+
+  - domain: nantes.maville.com
+    category: presse
+    icon: "📰"
+    priority: 2
+
+  # ─── Institutionnels et touristiques ────────────────────────
+  - domain: nantes.fr
+    category: institutionnel
+    icon: "🏛️"
+    priority: 1
+
+  - domain: nantes-tourisme.com
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+
+  - domain: levoyageanantes.fr
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+
+  # ─── Billetteries officielles ───────────────────────────────
+  - domain: fnacspectacles.com
+    category: billetterie
+    icon: "🎫"
+    priority: 1
+
+  - domain: ticketmaster.fr
+    category: billetterie
+    icon: "🎫"
+    priority: 1
+
+  - domain: francebillet.com
+    category: billetterie
+    icon: "🎫"
+    priority: 1
+
+  # ─── Lieux culturels nantais ────────────────────────────────
+  - domain: stereolux.org
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+
+  - domain: lelieuunique.com
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+
+  - domain: pannonica.com
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1

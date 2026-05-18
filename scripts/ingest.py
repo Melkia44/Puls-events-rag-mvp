@@ -12,10 +12,16 @@ Différence clé vs. ingestion P11 :
     désormais persistés dans la metadata de chaque Document, ce qui permet
     au filtre Haversine de utils/geo.py de faire son travail.
 
+[v2 — TOP-8] : `fetch_events()` accepte désormais un argument `city`
+optionnel pour permettre l'orchestration multi-villes via
+`scripts/ingest_top8.py` sans dupliquer la logique. Si non fourni,
+la variable d'environnement GEO_CITY (défaut "Nantes") est utilisée.
+
 Usage :
     cd puls-events-mvp
     source venv/bin/activate
-    python scripts/ingest.py
+    python scripts/ingest.py                    # Nantes (rétro-compatible)
+    GEO_CITY=Paris python scripts/ingest.py     # autre ville
 
 Variables d'environnement (.env) :
     MISTRAL_API_KEY        — requis
@@ -79,24 +85,26 @@ ODS_URL = (
 # ============================================================================
 # FETCH ODS
 # ============================================================================
+def fetch_events(city: Optional[str] = None) -> List[dict]:
+    """Récupère tous les événements ODS pour `city` avec pagination.
 
-def fetch_events() -> List[dict]:
-    """Récupère tous les événements ODS pour GEO_CITY avec pagination."""
+    [v2 — TOP-8] : argument `city` optionnel ajouté. Si None, utilise
+    GEO_CITY (variable d'environnement, défaut "Nantes"). Cette signature
+    rétro-compatible permet à scripts/ingest_top8.py d'orchestrer plusieurs
+    ingestions sans dupliquer le code de fetch.
+    """
+    city_used = city or GEO_CITY
     start_date = (datetime.now() - timedelta(days=FRESHNESS_DAYS)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
-
     where = (
-        f"location_city='{GEO_CITY}' AND "
+        f"location_city='{city_used}' AND "
         f"lastdate_end >= '{today}' AND "
         f"firstdate_begin >= '{start_date}'"
     )
-
-    logger.info(f"Fetch ODS — ville={GEO_CITY}, depuis {start_date}")
-
+    logger.info(f"Fetch ODS — ville={city_used}, depuis {start_date}")
     all_events: List[dict] = []
     offset = 0
     limit = 100  # max ODS
-
     while True:
         params = {
             "limit": limit,
@@ -106,7 +114,6 @@ def fetch_events() -> List[dict]:
         }
         if OPENDATASOFT_API_KEY:
             params["apikey"] = OPENDATASOFT_API_KEY
-
         try:
             r = requests.get(ODS_URL, params=params, timeout=15)
             r.raise_for_status()
@@ -114,25 +121,20 @@ def fetch_events() -> List[dict]:
         except requests.RequestException as e:
             logger.error(f"Erreur ODS offset={offset} : {e}")
             break
-
         if not results:
             break
-
         all_events.extend(results)
         logger.info(f"  offset {offset} → +{len(results)} (total {len(all_events)})")
-
         if len(results) < limit:
             break
         offset += limit
-
-    logger.info(f"Récupération terminée : {len(all_events)} événements bruts")
+    logger.info(f"Récupération terminée : {len(all_events)} événements bruts pour {city_used}")
     return all_events
 
 
 # ============================================================================
 # TRANSFORM
 # ============================================================================
-
 def _extract_coords(event: dict) -> tuple[Optional[float], Optional[float]]:
     """Extrait (lat, lng) depuis location_coordinates ODS.
 
@@ -154,17 +156,14 @@ def to_documents(raw_events: List[dict]) -> List[Document]:
     docs: List[Document] = []
     skipped_empty = 0
     no_coords = 0
-
     for ev in raw_events:
         title = (ev.get("title_fr") or "").strip()
         if not title:
             continue
-
         # page_content = description longue ou courte, selon disponibilité
         desc_long = (ev.get("longdescription_fr") or "").strip()
         desc_short = (ev.get("description_fr") or "").strip()
         conditions = (ev.get("conditions_fr") or "").strip()
-
         # Concaténation lisible (sans HTML), le splitter découpera ensuite
         parts = []
         if desc_long:
@@ -177,16 +176,13 @@ def to_documents(raw_events: List[dict]) -> List[Document]:
             parts.append(desc_short)
         if conditions:
             parts.append(f"Infos : {conditions}")
-
         page_content = " — ".join(parts).strip()
         if len(page_content) < 5:
             skipped_empty += 1
             continue
-
         lat, lng = _extract_coords(ev)
         if lat is None:
             no_coords += 1
-
         # Location formatée : "Nom (Adresse, Ville)"
         loc_name = (ev.get("location_name") or "").strip()
         loc_addr = (ev.get("location_address") or "").strip()
@@ -194,7 +190,6 @@ def to_documents(raw_events: List[dict]) -> List[Document]:
         location = loc_name
         if loc_addr or loc_city:
             location += f" ({loc_addr}{', ' if loc_addr and loc_city else ''}{loc_city})"
-
         metadata = {
             "title": title,
             "start_date": ev.get("firstdate_begin") or "",
@@ -208,7 +203,6 @@ def to_documents(raw_events: List[dict]) -> List[Document]:
             "city": loc_city,
         }
         docs.append(Document(page_content=page_content, metadata=metadata))
-
     logger.info(
         f"Transformés : {len(docs)} docs "
         f"(skipped_empty={skipped_empty}, no_coords={no_coords})"
@@ -219,7 +213,6 @@ def to_documents(raw_events: List[dict]) -> List[Document]:
 # ============================================================================
 # CHUNK + EMBED + SAVE
 # ============================================================================
-
 def chunk_documents(docs: List[Document]) -> List[Document]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -237,7 +230,6 @@ def build_index(chunks: List[Document]) -> FAISS:
         api_key=MISTRAL_API_KEY,
         model=EMBEDDING_MODEL,
     )
-
     vector_store: Optional[FAISS] = None
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
@@ -247,7 +239,6 @@ def build_index(chunks: List[Document]) -> FAISS:
         else:
             vector_store.add_documents(batch)
             time.sleep(0.5)  # rate-limit Mistral
-
     assert vector_store is not None
     return vector_store
 
@@ -255,30 +246,24 @@ def build_index(chunks: List[Document]) -> FAISS:
 # ============================================================================
 # MAIN
 # ============================================================================
-
 def main() -> int:
     if not MISTRAL_API_KEY:
         logger.error("MISTRAL_API_KEY manquant dans .env")
         return 1
-
-    raw = fetch_events()
+    raw = fetch_events()  # utilise GEO_CITY par défaut
     if not raw:
         logger.error("Aucun événement récupéré — abandon")
         return 1
-
     docs = to_documents(raw)
     if not docs:
         logger.error("Aucun document valide après transformation — abandon")
         return 1
-
     n_with_coords = sum(1 for d in docs if d.metadata.get("lat") is not None)
     logger.info(f"Coords disponibles sur {n_with_coords}/{len(docs)} documents")
-
     chunks = chunk_documents(docs)
     if not chunks:
         logger.error("Aucun chunk valide — abandon")
         return 1
-
     vector_store = build_index(chunks)
     n_target = vector_store.index.ntotal
     if n_target != len(chunks):
@@ -287,7 +272,6 @@ def main() -> int:
             f"index NON sauvegardé"
         )
         return 1
-
     FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
     vector_store.save_local(str(FAISS_INDEX_DIR))
     logger.info(f"Index sauvegardé dans {FAISS_INDEX_DIR} ({n_target} vecteurs)")
