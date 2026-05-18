@@ -56,7 +56,7 @@ from langchain_mistralai import ChatMistralAI
 
 from utils.config import (
     CHAT_MODEL, EXTRACTION_MODEL, EMBEDDING_MODEL,
-    FAISS_INDEX_PATH, RETRIEVER_K, MEMORY_WINDOW_SIZE,
+    FAISS_INDEX_PATH, RETRIEVER_K, RETRIEVER_K_GEO, MEMORY_WINDOW_SIZE,
     MISTRAL_API_KEY, DATABASE_URL,
     validate_config,
 )
@@ -166,7 +166,8 @@ except Exception as e:
 SHOW_DEBUG = os.getenv("SHOW_DEBUG", "0") == "1"
 logger.info(f"Mode debug UI : {'activé' if SHOW_DEBUG else 'désactivé'}")
 
-RETRIEVER_K_GEO = 20
+# [D3 v2] RETRIEVER_K_GEO est désormais centralisé dans utils/config.py
+# (source unique de vérité, lue aussi par les scripts de mesure).
 
 
 # ============================================================================
@@ -437,17 +438,27 @@ def rag_response(
 
     if geo_target is not None:
         candidates = VECTOR_STORE.similarity_search(user_message, k=RETRIEVER_K_GEO)
-        filtered, fallback = filter_by_radius(
+        filtered, fallback, strict_in_radius = filter_by_radius(
             candidates,
             user_lat=geo_target["lat"], user_lng=geo_target["lng"],
             radius_km=geo_target["radius_km"],
         )
         docs = filtered[:RETRIEVER_K]
-        geo_info = {**geo_target, "fallback": fallback}
+        # [D3 v2] geo_info expose deux compteurs distincts :
+        #   - kept            : docs réellement passés au prompt (post-fallback)
+        #   - strict_in_radius : docs STRICTEMENT dans le rayon (pré-fallback)
+        # Cas A (bascule Web) se déclenche sur strict_in_radius == 0, ce que
+        # kept ne pourrait jamais valoir (fallback non-filtré le remplit).
+        geo_info = {
+            **geo_target,
+            "fallback": fallback,
+            "kept": len(docs),
+            "strict_in_radius": strict_in_radius,
+        }
         logger.info(
             f"D2 actif : filtre {geo_target['radius_km']}km autour de "
             f"{geo_target['city']} (source={geo_target['source']}, "
-            f"fallback={fallback}, kept={len(docs)})"
+            f"fallback={fallback}, kept={len(docs)}, strict={strict_in_radius})"
         )
     else:
         # [TOP-8 — patch β] Si désactivation due au multi-villes,
@@ -579,31 +590,76 @@ def respond(
     user_id = user_state["id"]
     session_id = session_state.get("id") if session_state else None
 
-    # [D3] Routage RAG vs Web — décision en amont, latence ~500ms si LLM router
-    # On utilise les triggers regex + fallback retrieval count si possible
-    try:
-        decision, route_reason = route_to_rag_or_web(
-            message,
-            llm_router=LLM_ROUTER,
-        )
-        logger.info(f"D3 routage : {decision} ({route_reason})")
-    except Exception as e:
-        logger.warning(f"D3 routage error : {e} → RAG par défaut")
-        decision, route_reason = "rag", "routing_error"
+    # [D3 v2] Routage RAG-first : on tente toujours D1+D2 d'abord,
+    # puis on fallback Web si retrieval pauvre OU trigger explicite.
+    # Justification : éviter que le routeur LLM court-circuite D2 sur
+    # des requêtes géographiques légitimes ("concerts à 15 km de Nantes").
 
-    # Exécution selon le routage
     response_with_extras = ""
     response_clean = ""
+    decision = "rag"
+    route_reason = "rag_first_default"
+
     try:
-        if decision == "web" and WEB_AGENT is not None:
-            # [D3] Pipeline agent web
+        # Étape 1 — Triggers explicites prioritaires (billets, complet, etc.)
+        # → court-circuit direct vers Web, on ne tente même pas le RAG
+        from utils.web_agent import _FORCE_WEB_REGEX
+
+        if _FORCE_WEB_REGEX.search(message) and WEB_AGENT is not None:
+            decision, route_reason = "web", "trigger_keyword"
+            logger.info(f"D3 routage : web ({route_reason})")
             web_resp = WEB_AGENT.run(message)
             response_clean = web_resp.text
             response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
         else:
-            # Pipeline RAG (D1 + D2)
+            # Étape 2 — Pipeline RAG complet (D1 + D2)
             response_clean, sources, geo_info = rag_response(message, short_term, user_id)
-            response_with_extras = response_clean + _format_sources_html(sources, geo_info)
+
+            # Étape 3 — Décider a posteriori si fallback Web nécessaire
+            kept_count = (geo_info or {}).get("kept", len(sources) if sources else 0)
+            is_geo_query = bool(geo_info)
+            strict_count = (geo_info or {}).get("strict_in_radius", -1)
+            target_city = (geo_info or {}).get("city", "?")
+
+            # Cas A : requête géo SANS aucun événement réel dans le rayon
+            # (strict_in_radius == 0 — le fallback Haversine a rempli kept
+            # avec des docs hors zone). Ex : Saint-Nazaire hors corpus top-8
+            # → on bascule Web plutôt que de mentir avec des events Nantes.
+            if is_geo_query and strict_count == 0 and WEB_AGENT is not None:
+                decision, route_reason = "web", f"d2_strict_in_radius=0_city={target_city}"
+                logger.info(f"D3 routage : web ({route_reason})")
+                web_resp = WEB_AGENT.run(message)
+                response_clean = web_resp.text
+                response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
+
+            # Cas B : requête NON-géo → on consulte systématiquement le
+            # routeur LLM (peu importe kept_count). Le routeur tranche
+            # RAG vs Web selon la nature de la question (actu, billetterie…).
+            elif not is_geo_query and LLM_ROUTER is not None:
+                llm_decision, llm_reason = route_to_rag_or_web(
+                    message,
+                    llm_router=LLM_ROUTER,
+                    retrieval_count=kept_count,
+                )
+                if llm_decision == "web" and WEB_AGENT is not None:
+                    decision, route_reason = "web", f"llm_router_non_geo (kept={kept_count})"
+                    logger.info(f"D3 routage : web ({route_reason})")
+                    web_resp = WEB_AGENT.run(message)
+                    response_clean = web_resp.text
+                    response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
+                else:
+                    # Le LLM confirme RAG → on garde la réponse RAG
+                    logger.info(f"D3 routage : rag (llm_router_non_geo, kept={kept_count})")
+                    response_with_extras = response_clean + _format_sources_html(sources, geo_info)
+
+            # Cas C : requête géo avec résultats réels → RAG nominal (D2)
+            else:
+                logger.info(
+                    f"D3 routage : rag (kept={kept_count}, strict={strict_count}, "
+                    f"geo={is_geo_query})"
+                )
+                response_with_extras = response_clean + _format_sources_html(sources, geo_info)
+
     except Exception as e:
         logger.error(f"Erreur respond : {e}")
         response_clean = f"⚠️ Erreur lors de la génération : {str(e)[:200]}"

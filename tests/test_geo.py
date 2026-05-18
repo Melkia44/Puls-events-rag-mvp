@@ -148,21 +148,30 @@ class TestFilterByRadius:
         ]
 
     def test_filters_within_radius(self):
-        """À 15 km autour de Nantes, on garde Pannonica + Stereolux."""
-        kept, fallback = filter_by_radius(
+        """À 15 km de Nantes : 2 docs stricts < seuil 3 → fallback.
+
+        [D3 v2] Nouveau contrat : en fallback, filter_by_radius renvoie la
+        LISTE CANDIDATE D'ENTRÉE non filtrée (ici la fixture de 4 docs ;
+        en prod = top-K FAISS ~20, jamais le vector store entier), et
+        expose strict_in_radius=2 pour que respond() pilote le routage.
+        """
+        kept, fallback, strict_in_radius = filter_by_radius(
             self.docs, self.user_lat, self.user_lng, radius_km=15,
         )
-        # Min_docs_kept=3 par défaut → fallback car seulement 2 docs dans 15km
+        # Seulement 2 docs réellement dans 15 km < min_docs_kept=3
         assert fallback is True
-        # Mais les docs filtrés sont quand même les bons
+        assert strict_in_radius == 2
+        # Fallback = liste candidate d'entrée renvoyée telle quelle
+        # (Paris inclus car présent dans la fixture — contrat assumé)
         titles = [d.metadata["title"] for d in kept]
+        assert len(kept) == len(self.docs)
         assert "Pannonica (Nantes)" in titles
         assert "Stereolux (Nantes)" in titles
-        assert "Olympia (Paris)" not in titles
+        assert "Olympia (Paris)" in titles
 
     def test_keeps_3_at_60km(self):
         """À 60 km, on garde 3 docs (Nantes x2 + St-Nazaire) sans fallback."""
-        kept, fallback = filter_by_radius(
+        kept, fallback, _ = filter_by_radius(
             self.docs, self.user_lat, self.user_lng,
             radius_km=60, min_docs_kept=3,
         )
@@ -174,7 +183,7 @@ class TestFilterByRadius:
 
     def test_distance_metadata_added(self):
         """Chaque doc gardé doit avoir un metadata['distance_km'] arrondi."""
-        kept, _ = filter_by_radius(
+        kept, _, _ = filter_by_radius(
             self.docs, self.user_lat, self.user_lng, radius_km=400,
         )
         for d in kept:
@@ -189,7 +198,7 @@ class TestFilterByRadius:
             _make_doc("Sans coords", None, None),
             _make_doc("Pannonica", 47.2200, -1.5500),
         ]
-        kept, _ = filter_by_radius(
+        kept, _, _ = filter_by_radius(
             docs, self.user_lat, self.user_lng, radius_km=10, min_docs_kept=1,
         )
         titles = [d.metadata["title"] for d in kept]
@@ -198,7 +207,7 @@ class TestFilterByRadius:
 
     def test_fallback_when_zero_match(self):
         """Si aucun doc ne passe le filtre, on retourne TOUT en fallback."""
-        kept, fallback = filter_by_radius(
+        kept, fallback, _ = filter_by_radius(
             self.docs, self.user_lat, self.user_lng,
             radius_km=0.01,  # absurde
         )

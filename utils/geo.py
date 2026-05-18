@@ -265,14 +265,23 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 # Regex pour capturer "à 25 km", "dans un rayon de 30 km", "10km", etc.
 _RADIUS_REGEX = re.compile(
-    r"(?:rayon\s+de\s+|à\s+|dans\s+|\b)(\d{1,3})\s*km",
+    r"(?:rayon\s+de\s+|à\s+|dans\s+|\b)(\d{1,4})\s*km",
     re.IGNORECASE,
 )
 
-# Regex pour capturer "à Nantes", "vers Saint-Nazaire", "près de Rennes"
-# Capture le mot (ou groupe de mots avec tirets/apostrophes) après la préposition.
+# Regex pour capturer la ville cible dans le message utilisateur.
+# Deux familles de patterns sont supportées :
+#   1. Avec rayon explicite : "à 15 km de Nantes", "dans un rayon de 30 km de Lyon", "à 5km d'Angers"
+#   2. Direct : "à Nantes", "vers Saint-Nazaire", "près de Rennes", "autour de Bordeaux"
+# Le groupe de capture (1) reste le nom de la ville dans les deux cas.
 _LOCATION_REGEX = re.compile(
-    r"\b(?:à|vers|sur|près\s+de|autour\s+de|aux?\s+alentours?\s+de)\s+"
+    r"\b(?:"
+        # Famille 1 — rayon explicite : "à 15 km de", "à 30 km d'", "à 5km d Angers".
+        # Le connecteur élidé gère "de␣", "d'", "d'" (apostrophe typo) et "d␣".
+        r"(?:à|dans(?:\s+un\s+rayon\s+de)?)\s+\d{1,3}\s*km\s+(?:de\s+|d['’ ]\s*)"
+        # Famille 2 — prépositions directes (historique, espace géré ici).
+        r"|(?:à|vers|sur|près\s+de|autour\s+de|aux?\s+alentours?\s+de)\s+"
+    r")"
     r"([A-ZÀ-Ÿ][A-Za-zÀ-ÿ'\-]+(?:[\s\-][A-ZÀ-Ÿ][A-Za-zÀ-ÿ'\-]+){0,3})",
 )
 
@@ -355,7 +364,7 @@ def filter_by_radius(
     user_lng: float,
     radius_km: float = DEFAULT_RADIUS_KM,
     min_docs_kept: int = 3,
-) -> Tuple[list, bool]:
+) -> Tuple[list, bool, int]:
     """Filtre une liste de Documents LangChain par distance Haversine.
 
     Chaque Document doit avoir `metadata['lat']` et `metadata['lng']` —
@@ -371,14 +380,18 @@ def filter_by_radius(
             une réponse "rien trouvé".
 
     Returns:
-        (documents_filtrés, fallback_activé)
+        (documents_filtrés, fallback_activé, strict_in_radius)
         - documents_filtrés : trié par distance ascendante, avec
           metadata['distance_km'] ajouté (float arrondi à 1 décimale)
         - fallback_activé : True si le filtre a été désactivé faute de
           résultats suffisants. Sert à informer l'UI ("rayon trop strict").
+        - strict_in_radius : nb de docs STRICTEMENT dans le rayon (avant
+          tout fallback). 0 = aucun événement réel autour de la ville cible
+          → permet à respond() de basculer vers le Web (Cas A, ville hors
+          corpus top-8).
     """
     if not docs:
-        return [], False
+        return [], False, 0
 
     enriched = []
     skipped_no_coords = 0
@@ -412,16 +425,20 @@ def filter_by_radius(
     # Tri par distance ascendante (le plus proche en premier)
     enriched.sort(key=lambda d: d.metadata.get("distance_km", float("inf")))
 
-    # Garde-fou — fallback si filtre trop strict
-    if len(enriched) < min_docs_kept:
-        logger.warning(
-            f"Filtre géo a gardé seulement {len(enriched)} docs "
-            f"(seuil {min_docs_kept}), fallback activé"
-        )
-        # On garde quand même les docs filtrés s'il y en a, mais on signale
-        # le fallback pour que l'UI puisse afficher "rayon élargi"
-        if not enriched:
-            return docs, True
-        return enriched, True
+    # [D3 v2] strict_count = nb de docs STRICTEMENT dans le rayon (post-Haversine),
+    # exposé en 3e valeur de retour pour piloter le fallback Web (Cas A).
+    strict_count = len(enriched)
 
-    return enriched, False
+    if strict_count >= min_docs_kept:
+        return enriched, False, strict_count
+
+    # Garde-fou — fallback si filtre trop strict : on renvoie la liste
+    # candidate FAISS d'entrée NON filtrée (top-K élargi, ~20 docs — PAS
+    # le vector store entier) pour l'UX "éviter rien trouvé", mais on
+    # expose strict_count pour que respond() distingue "0 réel autour"
+    # (→ Cas A Web) de "peu de résultats" (→ Cas C RAG dégradé).
+    logger.warning(
+        f"Filtre géo a gardé seulement {strict_count} docs "
+        f"(seuil {min_docs_kept}), fallback activé"
+    )
+    return docs, True, strict_count

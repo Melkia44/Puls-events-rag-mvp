@@ -24,6 +24,14 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "data/faiss_index")
 RETRIEVER_K = int(os.getenv("RETRIEVER_K", "5"))
 
+# [D3 v2] Pool de candidats pour le filtre Haversine post-retrieval (D2).
+# similarity_search est géo-aveugle : un pool trop petit ne contient pas
+# assez de docs géo-locaux sur un corpus multi-villes (top-8). Mesure
+# empirique (tests/check_strict_distribution.py) : 100 ramène la majorité
+# des villes en RAG nominal. Coût nul (haversine Python, zéro appel LLM).
+# Source unique de vérité : app.py ET les scripts de mesure la lisent ici.
+RETRIEVER_K_GEO = int(os.getenv("RETRIEVER_K_GEO", "100"))
+
 # ============================================================================
 # Mémoire
 # ============================================================================
