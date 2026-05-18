@@ -81,7 +81,7 @@ class DomainEntry:
     @property
     def matches(self) -> str:
         """Forme normalisée pour matching (sans www., lowercase)."""
-        return self.domain.lower().lstrip("www.")
+        return self.domain.lower().removeprefix("www.")
 
 
 class DomainWhitelist:
@@ -129,7 +129,7 @@ class DomainWhitelist:
         if not url:
             return False
         try:
-            netloc = urlparse(url).netloc.lower().lstrip("www.")
+            netloc = urlparse(url).netloc.lower().removeprefix("www.")
         except Exception:
             return False
         # Match exact ou suffixe (sous-domaines acceptés du même 2LD)
@@ -147,7 +147,7 @@ class DomainWhitelist:
         if not url:
             return None
         try:
-            netloc = urlparse(url).netloc.lower().lstrip("www.")
+            netloc = urlparse(url).netloc.lower().removeprefix("www.")
         except Exception:
             return None
         if netloc in self._entries:
@@ -365,7 +365,7 @@ def web_search_filtered(
     seen_domains: set[str] = set()
     for _, result in filtered:
         try:
-            domain = urlparse(result.url).netloc.lower().lstrip("www.")
+            domain = urlparse(result.url).netloc.lower().removeprefix("www.")
         except Exception:
             domain = result.url
         if domain in seen_domains:
