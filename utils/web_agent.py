@@ -354,12 +354,32 @@ def web_search_filtered(
     # Étape 4 — Tri par priorité (croissante : 1 = prioritaire)
     filtered.sort(key=lambda x: x[0])
 
+    # Étape 4bis — Déduplication par domaine. Brave renvoie souvent
+    # plusieurs pages d'un même site (fnac ×2, infoconcert ×2) : sans
+    # dédup, le top-4 se remplit de 2 domaines redondants. On garde la
+    # 1re occurrence de chaque domaine (= la plus prioritaire, post-tri)
+    # pour maximiser la diversité des sources dans un budget réduit.
+    # Compromis assumé : 2 articles distincts d'un même média → 1 seul
+    # retenu (acceptable pour un MVP, max_results=4).
+    deduped: List[WebResult] = []
+    seen_domains: set[str] = set()
+    for _, result in filtered:
+        try:
+            domain = urlparse(result.url).netloc.lower().lstrip("www.")
+        except Exception:
+            domain = result.url
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        deduped.append(result)
+
     # Étape 5 — Top-K
-    top = [r for _, r in filtered[:max_results]]
+    top = deduped[:max_results]
 
     logger.info(
         f"Web search : {len(raw_results)} bruts via {source_used}, "
-        f"{len(top)}/{len(filtered)} après whitelist (top={max_results})"
+        f"{len(filtered)} whitelistés, {len(deduped)} après dédup domaine, "
+        f"{len(top)} retournés (top={max_results})"
     )
     return top
 

@@ -5,28 +5,54 @@
 # Tout résultat retourné par Brave Search dont l'URL ne match aucun de
 # ces domaines est silencieusement filtré.
 #
-# Catégorie : utilisée pour le pictogramme d'affichage dans le panneau
-# Sources et pour la priorisation (presse locale > billetterie > national).
+# CATÉGORIES & PICTOGRAMMES
+#   📰 presse          : quotidiens régionaux + nationaux culture
+#   📅 agenda_local    : médias culturels spécialisés (ligne édito assumée)
+#   🏛️  institutionnel  : mairies, offices de tourisme, agences culturelles
+#   🎫 billetterie     : billetteries officielles
+#   🎭 lieu_culturel   : scènes / opéras / lieux emblématiques par ville
 #
-# Pour ajouter/retirer un domaine : modifier ce fichier et redémarrer
-# l'app. Aucun rebuild Docker nécessaire.
+# PRIORISATION (champ priority, croissante : 1 = top)
+#   1 : presse régionale, agenda local, lieu emblématique, billetterie officielle
+#   2 : institutionnel (souvent moins riche en actualité événementielle)
 #
-# Anti-patterns évités :
+# COUVERTURE
+#   Top-8 villes du périmètre Puls-Events :
+#   Paris, Lyon, Marseille, Toulouse, Nantes, Bordeaux, Lille, Strasbourg
+#
+# MAINTENANCE
+#   Pour ajouter/retirer un domaine : modifier ce fichier et redémarrer
+#   l'app. Aucun rebuild Docker nécessaire.
+#
+# FILTRAGE DOMAINE-BASED
+#   Le matcher whitelist opère sur le domaine (netloc), pas sur l'URL
+#   complète. Conséquence : `ouest-france.fr` capture automatiquement
+#   `ouest-france.fr/presse-ocean/`, `ouest-france.fr/loire-atlantique/`,
+#   etc. Pas besoin de dupliquer les sous-rubriques.
+#
+# ANTI-PATTERNS ÉVITÉS
 #   - Pas de wildcards "*.fr" qui laisseraient passer n'importe quoi
-#   - Pas de sous-domaines vagues (boutique.exemple.fr OK, *.exemple.fr non)
 #   - Pas de réseaux sociaux (Twitter/X, Facebook) — qualité éditoriale
-#     trop variable, risque de faux billets
+#     trop variable, risque de faux billets ou de désinformation
+#   - Pas de quotidiens nationaux généralistes (Le Monde, Le Parisien) :
+#     trop de bruit (politique, faits divers) pour un agent culturel
 #
-# Réf. backlog : US-603 (whitelist domaines), R-09 (dépendance smolagents)
+# Réf. backlog : US-603 (whitelist domaines), R-09 (dépendance smolagents),
+#                US-701 (extension multi-villes — élargissement post-MVP)
 # ─────────────────────────────────────────────────────────────────────
 
 domains:
 
-  # ─── Presse locale et régionale ────────────────────────────
+  # ═══════════════════════════════════════════════════════════════════
+  # PRESSE RÉGIONALE
+  # ═══════════════════════════════════════════════════════════════════
+
   - domain: ouest-france.fr
     category: presse
     icon: "📰"
     priority: 1
+    # Couvre Nantes + Loire-Atlantique + sous-rubrique Presse Océan
+    # (le filtre domaine-based capture tous les sous-chemins)
 
   - domain: presse-ocean.fr
     category: presse
@@ -38,7 +64,118 @@ domains:
     icon: "📰"
     priority: 2
 
-  # ─── Institutionnels et touristiques ────────────────────────
+  # ═══════════════════════════════════════════════════════════════════
+  # AGENDA LOCAL — médias culturels spécialisés
+  # ═══════════════════════════════════════════════════════════════════
+
+  # ─── Transverse (national, sous-domaines départementaux) ──
+  - domain: agendaculturel.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Agenda culturel national à sous-domaines départementaux
+    # (38.agendaculturel.fr, 31., 75., 13.…). Le matcher domaine-based
+    # capture automatiquement tous les départements. Mesure empirique
+    # (tests/check + diagnostic Brave) : remonté sur 4/4 requêtes test,
+    # couvre toutes les villes hors top-8 curaté (Vienne, Aix…).
+
+  # ─── Paris ─────────────────────────────────────────────
+  - domain: lylo.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Bible des concerts et spectacles à Paris
+
+  - domain: offi.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Agenda culturel parisien complémentaire de Lylo
+
+  # ─── Lyon ──────────────────────────────────────────────
+  - domain: lyon.citycrunch.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Agenda culturel et sorties dynamique sur Lyon
+
+  # ─── Marseille ─────────────────────────────────────────
+  - domain: journalventilo.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Journal culturel de référence sur Marseille et région
+
+  # ─── Toulouse ──────────────────────────────────────────
+  - domain: clutchmag.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Média culturel toulousain avec agenda complet
+
+  # ─── Bordeaux ──────────────────────────────────────────
+  - domain: bordeaux-gazette.com
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Média culturel bordelais
+
+  # ─── Lille ─────────────────────────────────────────────
+  - domain: zoomons.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Agenda sorties métropole lilloise
+
+  - domain: lillelanuit.com
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Agenda concerts et nightlife lilloise
+
+  # ─── Strasbourg ────────────────────────────────────────
+  - domain: coze.fr
+    category: agenda_local
+    icon: "📅"
+    priority: 1
+    # Magazine de l'agenda culturel alsacien
+
+  # ═══════════════════════════════════════════════════════════════════
+  # INSTITUTIONNEL — mairies, offices de tourisme
+  # ═══════════════════════════════════════════════════════════════════
+
+  # ─── Paris ─────────────────────────────────────────────
+  # (couverture institutionnelle Paris via Lylo/Offi — pas de doublon)
+
+  # ─── Lyon ──────────────────────────────────────────────
+  - domain: lyon-france.com
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+    # Office de tourisme officiel de Lyon
+
+  # ─── Marseille ─────────────────────────────────────────
+  - domain: marseille-tourisme.com
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+    # Office de tourisme officiel de Marseille
+
+  # ─── Toulouse ──────────────────────────────────────────
+  - domain: toulouse-tourisme.com
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+    # Office de tourisme officiel de Toulouse
+
+  # ─── Bordeaux ──────────────────────────────────────────
+  - domain: bordeaux.fr
+    category: institutionnel
+    icon: "🏛️"
+    priority: 2
+    # Site officiel de la mairie de Bordeaux (agenda culturel municipal)
+
+  # ─── Nantes ────────────────────────────────────────────
   - domain: nantes.fr
     category: institutionnel
     icon: "🏛️"
@@ -53,8 +190,12 @@ domains:
     category: institutionnel
     icon: "🏛️"
     priority: 2
+    # Politique culturelle/touristique emblématique de Nantes
 
-  # ─── Billetteries officielles ───────────────────────────────
+  # ═══════════════════════════════════════════════════════════════════
+  # BILLETTERIE — toutes villes
+  # ═══════════════════════════════════════════════════════════════════
+
   - domain: fnacspectacles.com
     category: billetterie
     icon: "🎫"
@@ -70,11 +211,57 @@ domains:
     icon: "🎫"
     priority: 1
 
-  # ─── Lieux culturels nantais ────────────────────────────────
+  - domain: infoconcert.com
+    category: billetterie
+    icon: "🎫"
+    priority: 1
+    # Complément de Ticketmaster pour les dates de tournées
+
+  # ═══════════════════════════════════════════════════════════════════
+  # LIEUX CULTURELS — scènes emblématiques par ville
+  # ═══════════════════════════════════════════════════════════════════
+
+  # ─── Paris ─────────────────────────────────────────────
+  - domain: philharmoniedeparis.fr
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # Référence classique, jazz et expositions musicales
+
+  # ─── Toulouse ──────────────────────────────────────────
+  - domain: theatreducapitole.fr
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # Opéra et Ballet national de Toulouse
+
+  # ─── Bordeaux ──────────────────────────────────────────
+  - domain: opera-bordeaux.com
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # Opéra National de Bordeaux (programmation lyrique et symphonique)
+
+  # ─── Lille ─────────────────────────────────────────────
+  - domain: grandmix.com
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # Scène majeure de Tourcoing / Métropole lilloise
+
+  # ─── Strasbourg ────────────────────────────────────────
+  - domain: theatrenational.eu
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # TNS (Théâtre National de Strasbourg)
+
+  # ─── Nantes ────────────────────────────────────────────
   - domain: stereolux.org
     category: lieu_culturel
     icon: "🎭"
     priority: 1
+    # Scène musiques actuelles et arts numériques de référence
 
   - domain: lelieuunique.com
     category: lieu_culturel
@@ -85,3 +272,9 @@ domains:
     category: lieu_culturel
     icon: "🎭"
     priority: 1
+
+  - domain: lacarriere.fr
+    category: lieu_culturel
+    icon: "🎭"
+    priority: 1
+    # Salle de spectacles emblématique de l'agglo nantaise
