@@ -278,7 +278,4 @@ Voir les notes annotées : `git show <tag>`.
 
 ---
 
-## 🆘 Support
 
-- Issues GitHub : [github.com/Melkia44/Puls-events-rag-mvp/issues](https://github.com/Melkia44/Puls-events-rag-mvp/issues)
-- Auteur : Mathieu Lowagie
