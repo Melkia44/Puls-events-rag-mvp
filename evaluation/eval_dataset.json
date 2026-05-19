@@ -1,0 +1,42 @@
+[
+  {
+    "question": "Quels concerts à Nantes ce week-end ?",
+    "category": "D2 nominal Cas C"
+  },
+  {
+    "question": "Festivals de jazz à Paris en mai",
+    "category": "D2 nominal Cas C"
+  },
+  {
+    "question": "Spectacles de danse à Lyon",
+    "category": "D2 nominal Cas C"
+  },
+  {
+    "question": "Expositions à Bordeaux ce mois-ci",
+    "category": "D2 nominal Cas C"
+  },
+  {
+    "question": "Concerts à 15 km de Saint-Nazaire",
+    "category": "D2 hors-couverture Cas A"
+  },
+  {
+    "question": "Que faire à Bayonne ce soir ?",
+    "category": "D2 hors-couverture Cas A"
+  },
+  {
+    "question": "Comment réserver des billets pour le festival Beauregard ?",
+    "category": "D3 trigger_keyword Web"
+  },
+  {
+    "question": "Annonces récentes de Stéréolux",
+    "category": "D3 trigger_keyword Web"
+  },
+  {
+    "question": "Recommande-moi une soirée à Marseille, j'aime le rock",
+    "category": "D1 préférence + RAG"
+  },
+  {
+    "question": "Tu te souviens de ce que j'aime ?",
+    "category": "D1 mémoire (edge case)"
+  }
+]
