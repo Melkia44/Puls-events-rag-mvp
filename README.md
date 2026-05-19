@@ -185,12 +185,6 @@ python scripts/evaluate_ragas.py
 
 ---
 
-## 📜 Licence
-
-MIT — voir [LICENSE](./LICENSE) si présent.
-
----
-
 ## 👤 Auteur
 
 **Mathieu Lowagie** — Parcours Data Engineer OpenClassrooms 2026
@@ -198,4 +192,3 @@ MIT — voir [LICENSE](./LICENSE) si présent.
 
 ---
 
-<sub>🤖 Développé avec l'assistance d'agents IA — voir les 8+ tags Git annotés pour la chronologie complète du projet.</sub>
