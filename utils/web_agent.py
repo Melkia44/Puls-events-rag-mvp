@@ -47,6 +47,26 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+# [D4] Handler Langfuse partagé pour ce module. Singleton lazy : on évite
+# de recréer un CallbackHandler à chaque invoke LLM (hot-path : routeur +
+# agent web) et le prop drilling depuis app.py. Sentinelle distincte de
+# None car None = "init échouée / Langfuse indispo" (dégradation gracieuse).
+_LANGFUSE_HANDLER: Any = "uninitialized"
+
+
+def _langfuse_config() -> dict:
+    """Retourne le config LangChain Langfuse, ou {} si Langfuse indisponible."""
+    global _LANGFUSE_HANDLER
+    if _LANGFUSE_HANDLER == "uninitialized":
+        try:
+            from langfuse.langchain import CallbackHandler
+            _LANGFUSE_HANDLER = CallbackHandler()
+        except Exception as e:
+            logger.warning(f"Langfuse indisponible ({e}) — traçage D4 désactivé")
+            _LANGFUSE_HANDLER = None
+    return {"callbacks": [_LANGFUSE_HANDLER]} if _LANGFUSE_HANDLER else {}
+
+
 # ============================================================================
 # CONFIG
 # ============================================================================
@@ -490,7 +510,7 @@ def route_to_rag_or_web(
 
     prompt = ROUTER_PROMPT_TEMPLATE.format(question=question)
     try:
-        response = llm_router.invoke(prompt)
+        response = llm_router.invoke(prompt, config=_langfuse_config())
         decision = (response.content or "").strip().upper()
     except Exception as e:
         logger.warning(f"Routeur LLM error : {e} → fallback RAG")
@@ -588,7 +608,7 @@ class PulsWebAgent:
         )
 
         try:
-            llm_resp = self.llm.invoke(prompt)
+            llm_resp = self.llm.invoke(prompt, config=_langfuse_config())
             text = llm_resp.content
         except Exception as e:
             logger.error(f"Agent web LLM error : {e}")

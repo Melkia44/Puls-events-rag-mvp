@@ -22,3 +22,6 @@ smolagents
 pyyaml
 ddgs
 pytest
+
+# Observabilité LLM (D4)
+langfuse>=3.0.0

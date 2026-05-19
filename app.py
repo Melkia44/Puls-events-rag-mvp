@@ -54,6 +54,10 @@ from typing import List, Tuple, Dict, Any, Optional
 import gradio as gr
 from langchain_mistralai import ChatMistralAI
 
+# === Langfuse — Observabilité LLM (D4) ===
+from langfuse import observe, get_client
+from langfuse.langchain import CallbackHandler
+
 from utils.config import (
     CHAT_MODEL, EXTRACTION_MODEL, EMBEDDING_MODEL,
     FAISS_INDEX_PATH, RETRIEVER_K, RETRIEVER_K_GEO, MEMORY_WINDOW_SIZE,
@@ -132,6 +136,22 @@ LLM_ROUTER = ChatMistralAI(
     model=EXTRACTION_MODEL,  # mistral-small-latest
     temperature=0.0,         # déterministe pour le routage
 ) if MISTRAL_API_KEY else None
+
+# === [D4] Langfuse — traçage automatique des appels LLM ===
+# Le handler intercepte les .invoke() LangChain auxquels on passe
+# config={"callbacks": [LANGFUSE_HANDLER]} : prompt + completion + tokens
+# + latence + coût € remontent au dashboard Langfuse. Dégradation
+# gracieuse (None) si clés absentes/invalides — l'observabilité D4 ne
+# doit jamais faire tomber l'app.
+try:
+    LANGFUSE_HANDLER = CallbackHandler()
+    logger.info(
+        f"Langfuse callback initialisé "
+        f"(host={os.getenv('LANGFUSE_HOST', 'défaut SDK')})"
+    )
+except Exception as e:
+    logger.error(f"Échec init Langfuse : {e} — observabilité D4 désactivée")
+    LANGFUSE_HANDLER = None
 
 
 # [D3] Whitelist de domaines + agent web
@@ -501,7 +521,11 @@ def rag_response(
         profile=profile_block,
     )
 
-    response = LLM.invoke(prompt)
+    # [D4] Callback Langfuse pour traçage automatique (prompt, tokens, latence, coût)
+    response = LLM.invoke(
+        prompt,
+        config={"callbacks": [LANGFUSE_HANDLER]} if LANGFUSE_HANDLER else {},
+    )
     return (response.content, docs, geo_info)
 
 
