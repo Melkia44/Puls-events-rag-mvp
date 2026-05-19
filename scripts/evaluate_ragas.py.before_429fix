@@ -1,0 +1,243 @@
+"""
+scripts/evaluate_ragas.py
+─────────────────────────
+Évaluation automatique du pipeline RAG Puls via RAGAS.
+
+Boucle sur evaluation/eval_dataset.json, appelle le vrai pipeline RAG
+de l'application pour chaque question, puis calcule 2 métriques RAGAS :
+  - faithfulness    : la réponse est-elle factuellement supportée
+                      par les sources retournées (anti-hallucination)
+  - answer_relevancy: la réponse répond-elle vraiment à la question
+
+Mistral Large est utilisé comme LLM-as-judge (cohérent avec le pipeline).
+Résultats exportés en CSV horodaté dans evaluation/.
+
+Usage :
+    python scripts/evaluate_ragas.py
+
+Coût estimé : ~$0.02 sur 10 questions (Mistral La Plateforme).
+"""
+
+from __future__ import annotations
+import os
+import sys
+import json
+import time
+import logging
+from datetime import datetime
+from pathlib import Path
+
+# Ajouter la racine du projet au PYTHONPATH pour importer depuis app.py
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# Logger minimaliste pour ce script
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logger = logging.getLogger("ragas_eval")
+
+# Désactiver les logs verbeux des libs tierces
+for noisy in ("httpx", "httpcore", "urllib3", "sentence_transformers", "ragas"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════
+DATASET_PATH = ROOT / "evaluation" / "eval_dataset.json"
+OUTPUT_DIR = ROOT / "evaluation"
+TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_CSV = OUTPUT_DIR / f"ragas_results_{TIMESTAMP}.csv"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 1. Charger le dataset
+# ═══════════════════════════════════════════════════════════════════
+def load_eval_dataset():
+    logger.info(f"📋 Chargement du dataset : {DATASET_PATH}")
+    with open(DATASET_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    logger.info(f"   → {len(data)} questions chargées")
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 2. Importer le pipeline RAG depuis app.py
+# ═══════════════════════════════════════════════════════════════════
+def load_pipeline():
+    logger.info("🔧 Chargement du pipeline RAG (import app.py)...")
+    # Import ici pour éviter le chargement Gradio au top-level
+    from app import LLM, rag_response
+    from utils.memory.short_term import ShortTermMemory
+    logger.info("   → Pipeline chargé (LLM Mistral Large + rag_response)")
+    return LLM, rag_response, ShortTermMemory
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. Générer réponses + contextes pour chaque question
+# ═══════════════════════════════════════════════════════════════════
+def run_pipeline_on_questions(questions, rag_response, ShortTermMemory):
+    """Pour chaque question, appelle rag_response et récupère :
+       - la réponse générée
+       - les contextes (extraits des Documents sources retournés)
+    """
+    results = []
+    for i, item in enumerate(questions, 1):
+        q = item["question"]
+        category = item.get("category", "?")
+        logger.info(f"[{i}/{len(questions)}] {category} | {q[:60]}...")
+
+        # Pipeline minimal : pas d'user_id réel, pas de short_term préchargé.
+        # On évalue le RAG "à froid" — comportement par défaut sans contexte.
+        short_term = ShortTermMemory(window_size=5)
+        user_id = None   # éval = sans profil, baseline objective
+
+        try:
+            t0 = time.time()
+            answer, docs, geo_info = rag_response(q, short_term, user_id)
+            latency = time.time() - t0
+
+            # Extraire les contextes des Documents LangChain retournés
+            contexts = [d.page_content for d in (docs or [])][:5]  # cap à 5 sources
+
+            results.append({
+                "question": q,
+                "category": category,
+                "answer": answer,
+                "contexts": contexts,
+                "latency_s": round(latency, 2),
+                "n_contexts": len(contexts),
+            })
+            logger.info(f"   ✅ {len(contexts)} contextes, {latency:.1f}s, "
+                        f"{len(answer)} chars")
+        except Exception as e:
+            logger.error(f"   ❌ Erreur sur question {i} : {e}")
+            results.append({
+                "question": q,
+                "category": category,
+                "answer": f"[ERREUR PIPELINE] {e}",
+                "contexts": [],
+                "latency_s": 0.0,
+                "n_contexts": 0,
+            })
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. Évaluation RAGAS
+# ═══════════════════════════════════════════════════════════════════
+def evaluate_with_ragas(results, LLM):
+    """Calcule faithfulness + answer_relevancy via RAGAS.
+    Utilise Mistral Large (LLM existant) comme LLM-as-judge.
+    """
+    logger.info("⚖️  Évaluation RAGAS (faithfulness + answer_relevancy)...")
+    from datasets import Dataset
+    from ragas import evaluate
+    from ragas.metrics import faithfulness, answer_relevancy
+    from ragas.llms import LangchainLLMWrapper
+    from langchain_mistralai import MistralAIEmbeddings
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+
+    # Filtrer les résultats sans contextes (impossibles à évaluer pour faithfulness)
+    eval_data = [r for r in results if r["contexts"]]
+    skipped = len(results) - len(eval_data)
+    if skipped:
+        logger.warning(f"   ⚠️  {skipped} questions sans contextes, exclues de l'éval RAGAS")
+
+    if not eval_data:
+        logger.error("   ❌ Aucune donnée à évaluer (toutes les questions sans contextes)")
+        return None
+
+    # Format RAGAS attendu
+    ds = Dataset.from_dict({
+        "question": [r["question"] for r in eval_data],
+        "answer":   [r["answer"]   for r in eval_data],
+        "contexts": [r["contexts"] for r in eval_data],
+    })
+
+    # Wrap Mistral Large comme juge + embeddings Mistral pour les métriques
+    judge_llm = LangchainLLMWrapper(LLM)
+    embeddings = LangchainEmbeddingsWrapper(
+        MistralAIEmbeddings(model="mistral-embed")
+    )
+
+    # Lancement éval — peut prendre 2-5 min selon la taille du dataset
+    result = evaluate(
+        dataset=ds,
+        metrics=[faithfulness, answer_relevancy],
+        llm=judge_llm,
+        embeddings=embeddings,
+        raise_exceptions=False,
+    )
+    logger.info(f"   ✅ Éval RAGAS terminée")
+    return result, eval_data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. Export CSV + résumé console
+# ═══════════════════════════════════════════════════════════════════
+def export_results(ragas_result, eval_data, all_results):
+    import pandas as pd
+
+    # ragas_result.to_pandas() renvoie un DF avec les scores par question
+    df_ragas = ragas_result.to_pandas()
+
+    # Merge avec les métadonnées (catégorie, latence)
+    df_meta = pd.DataFrame([{
+        "question": r["question"],
+        "category": r["category"],
+        "latency_s": r["latency_s"],
+        "n_contexts": r["n_contexts"],
+    } for r in eval_data])
+
+    df_final = pd.merge(df_meta, df_ragas, on="question", how="left")
+    df_final.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
+    logger.info(f"💾 Résultats exportés : {OUTPUT_CSV}")
+
+    # Résumé console
+    print("\n" + "═" * 70)
+    print("📊 RÉSULTATS RAGAS — Évaluation Puls MVP P13")
+    print("═" * 70)
+    print(f"Date     : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Dataset  : {len(all_results)} questions")
+    print(f"Évaluées : {len(eval_data)} (avec contextes)")
+    print(f"Skippées : {len(all_results) - len(eval_data)} (sans contextes)")
+    print("─" * 70)
+
+    if "faithfulness" in df_final.columns:
+        f_mean = df_final["faithfulness"].mean()
+        print(f"Faithfulness     (anti-hallucination) : {f_mean:.3f}")
+    if "answer_relevancy" in df_final.columns:
+        r_mean = df_final["answer_relevancy"].mean()
+        print(f"Answer relevancy (pertinence)         : {r_mean:.3f}")
+
+    print("─" * 70)
+    print(f"📁 Détails par question : {OUTPUT_CSV.name}")
+    print("═" * 70 + "\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+def main():
+    logger.info("🚀 Évaluation RAGAS — démarrage")
+    logger.info(f"   Sortie : {OUTPUT_CSV}")
+
+    questions = load_eval_dataset()
+    LLM, rag_response, ShortTermMemory = load_pipeline()
+    all_results = run_pipeline_on_questions(questions, rag_response, ShortTermMemory)
+
+    ragas_result, eval_data = evaluate_with_ragas(all_results, LLM)
+    if ragas_result is None:
+        logger.error("Échec éval RAGAS")
+        sys.exit(1)
+
+    export_results(ragas_result, eval_data, all_results)
+    logger.info("✅ Terminé")
+
+
+if __name__ == "__main__":
+    main()
