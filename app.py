@@ -320,6 +320,21 @@ def _format_web_block(web_response, route_reason: str) -> str:
     return badge + panel
 
 
+def _run_web_agent(message: str, route_reason: str) -> Tuple[str, str]:
+    """Exécute l'agent web et formate la réponse.
+
+    Centralise les 3 points de bascule Web de respond() (trigger explicite,
+    requête géo sans résultat, routeur LLM) pour qu'une évolution du
+    formatage web n'ait qu'un seul site à modifier.
+
+    Returns:
+        (response_clean, response_with_extras)
+    """
+    logger.info(f"D3 routage : web ({route_reason})")
+    web_resp = WEB_AGENT.run(message)
+    return web_resp.text, web_resp.text + _format_web_block(web_resp, route_reason)
+
+
 # ============================================================================
 # LOGIQUE MÉTIER — RAG + GEO (inchangée)
 # ============================================================================
@@ -639,10 +654,7 @@ def respond(
 
         if _FORCE_WEB_REGEX.search(message) and WEB_AGENT is not None:
             decision, route_reason = "web", "trigger_keyword"
-            logger.info(f"D3 routage : web ({route_reason})")
-            web_resp = WEB_AGENT.run(message)
-            response_clean = web_resp.text
-            response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
+            response_clean, response_with_extras = _run_web_agent(message, route_reason)
         else:
             # Étape 2 — Pipeline RAG complet (D1 + D2)
             response_clean, sources, geo_info = rag_response(message, short_term, user_id)
@@ -659,10 +671,7 @@ def respond(
             # → on bascule Web plutôt que de mentir avec des events Nantes.
             if is_geo_query and strict_count == 0 and WEB_AGENT is not None:
                 decision, route_reason = "web", f"d2_strict_in_radius=0_city={target_city}"
-                logger.info(f"D3 routage : web ({route_reason})")
-                web_resp = WEB_AGENT.run(message)
-                response_clean = web_resp.text
-                response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
+                response_clean, response_with_extras = _run_web_agent(message, route_reason)
 
             # Cas B : requête NON-géo → on consulte systématiquement le
             # routeur LLM (peu importe kept_count). Le routeur tranche
@@ -675,10 +684,7 @@ def respond(
                 )
                 if llm_decision == "web" and WEB_AGENT is not None:
                     decision, route_reason = "web", f"llm_router_non_geo (kept={kept_count})"
-                    logger.info(f"D3 routage : web ({route_reason})")
-                    web_resp = WEB_AGENT.run(message)
-                    response_clean = web_resp.text
-                    response_with_extras = response_clean + _format_web_block(web_resp, route_reason)
+                    response_clean, response_with_extras = _run_web_agent(message, route_reason)
                 else:
                     # Le LLM confirme RAG → on garde la réponse RAG
                     logger.info(f"D3 routage : rag (llm_router_non_geo, kept={kept_count})")
@@ -958,6 +964,22 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
         - session_state : pointe vers la session sélectionnée (devient active)
         """
         if not session_id or LTM is None:
+            return gr.update(), short_term, gr.update()
+
+        user_id = user_state.get("id") if user_state else None
+        if user_id is None:
+            logger.warning("Sidebar : clic session sans utilisateur actif — ignoré")
+            return gr.update(), short_term, gr.update()
+
+        # Garde anti-IDOR : les session_id sont des entiers séquentiels
+        # devinables — on refuse de charger une session hors périmètre de
+        # l'utilisateur actif. Réutilise list_user_sessions (déjà borné).
+        owned = {s["session_id"] for s in LTM.list_user_sessions(user_id, limit=20)}
+        if int(session_id) not in owned:
+            logger.warning(
+                f"Sidebar : session {session_id} hors périmètre user "
+                f"{user_id} — refus"
+            )
             return gr.update(), short_term, gr.update()
 
         try:

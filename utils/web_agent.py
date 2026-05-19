@@ -70,6 +70,17 @@ BRAVE_RAW_RESULTS = 15
 # WHITELIST DE DOMAINES
 # ============================================================================
 
+def _normalize_domain(value: str) -> str:
+    """Domaine normalisé pour matching whitelist : lowercase, sans 'www.'.
+
+    Accepte une URL complète ('https://www.x.fr/p') ou un domaine nu
+    ('x.fr') — urlparse renvoie un netloc vide sur un domaine nu, d'où
+    le fallback `or value`.
+    """
+    netloc = urlparse(value).netloc or value
+    return netloc.lower().removeprefix("www.")
+
+
 @dataclass
 class DomainEntry:
     """Une entrée de la whitelist YAML, structurée pour l'affichage."""
@@ -81,7 +92,7 @@ class DomainEntry:
     @property
     def matches(self) -> str:
         """Forme normalisée pour matching (sans www., lowercase)."""
-        return self.domain.lower().removeprefix("www.")
+        return _normalize_domain(self.domain)
 
 
 class DomainWhitelist:
@@ -129,7 +140,7 @@ class DomainWhitelist:
         if not url:
             return False
         try:
-            netloc = urlparse(url).netloc.lower().removeprefix("www.")
+            netloc = _normalize_domain(url)
         except Exception:
             return False
         # Match exact ou suffixe (sous-domaines acceptés du même 2LD)
@@ -147,7 +158,7 @@ class DomainWhitelist:
         if not url:
             return None
         try:
-            netloc = urlparse(url).netloc.lower().removeprefix("www.")
+            netloc = _normalize_domain(url)
         except Exception:
             return None
         if netloc in self._entries:
@@ -365,7 +376,7 @@ def web_search_filtered(
     seen_domains: set[str] = set()
     for _, result in filtered:
         try:
-            domain = urlparse(result.url).netloc.lower().removeprefix("www.")
+            domain = _normalize_domain(result.url)
         except Exception:
             domain = result.url
         if domain in seen_domains:

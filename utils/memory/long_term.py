@@ -284,10 +284,22 @@ class LongTermMemory:
         from sqlalchemy import func
 
         with self._session() as s:
+            # Sessions de cet utilisateur — borne la sous-requête preview
+            # à ses propres messages (sinon DISTINCT ON scanne la table
+            # messages de TOUS les utilisateurs).
+            user_session_ids = (
+                s.query(ConversationSession.id)
+                .filter(ConversationSession.user_id == user_id)
+                .subquery()
+            )
+
             # Sous-requête : 1er message user de chaque session (preview)
             first_msg_subq = (
                 s.query(Message.session_id, Message.content)
-                .filter(Message.role == "user")
+                .filter(
+                    Message.role == "user",
+                    Message.session_id.in_(s.query(user_session_ids.c.id)),
+                )
                 .order_by(Message.session_id, Message.ts.asc())
                 .distinct(Message.session_id)
                 .subquery()
