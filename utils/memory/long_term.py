@@ -255,6 +255,106 @@ class LongTermMemory:
             msg = Message(session_id=session_id, role=role, content=content)
             s.add(msg)
 
+    # --- Lecture sessions (sidebar historique) ---
+
+    def list_user_sessions(
+        self,
+        user_id: int,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Liste les dernières sessions d'un utilisateur pour la sidebar UI.
+
+        Filtre les sessions vides (zéro message) — on n'affiche que celles
+        qui contiennent au moins une vraie interaction.
+
+        Args:
+            user_id: identifiant de l'utilisateur
+            limit: nombre max de sessions retournées (défaut 20)
+
+        Returns:
+            Liste de dicts triée par dernier message DESC (plus récente d'abord) :
+                [{
+                    "session_id": int,
+                    "started_at": datetime,
+                    "last_message_at": datetime,
+                    "preview": str (1er message user, tronqué à 80 chars),
+                    "msg_count": int,
+                }, ...]
+        """
+        from sqlalchemy import func
+
+        with self._session() as s:
+            # Sous-requête : 1er message user de chaque session (preview)
+            first_msg_subq = (
+                s.query(Message.session_id, Message.content)
+                .filter(Message.role == "user")
+                .order_by(Message.session_id, Message.ts.asc())
+                .distinct(Message.session_id)
+                .subquery()
+            )
+
+            # Requête principale : sessions + agrégats messages
+            results = (
+                s.query(
+                    ConversationSession.id,
+                    ConversationSession.started_at,
+                    func.max(Message.ts).label("last_message_at"),
+                    func.count(Message.id).label("msg_count"),
+                    first_msg_subq.c.content.label("preview"),
+                )
+                .join(Message, Message.session_id == ConversationSession.id)
+                .outerjoin(
+                    first_msg_subq,
+                    first_msg_subq.c.session_id == ConversationSession.id,
+                )
+                .filter(ConversationSession.user_id == user_id)
+                .group_by(
+                    ConversationSession.id,
+                    ConversationSession.started_at,
+                    first_msg_subq.c.content,
+                )
+                .having(func.count(Message.id) > 0)
+                .order_by(func.max(Message.ts).desc())
+                .limit(limit)
+                .all()
+            )
+
+            return [
+                {
+                    "session_id": r.id,
+                    "started_at": r.started_at,
+                    "last_message_at": r.last_message_at,
+                    "preview": (r.preview or "")[:80].strip(),
+                    "msg_count": r.msg_count,
+                }
+                for r in results
+            ]
+
+    def load_session_history(
+        self,
+        session_id: int,
+    ) -> List[Dict[str, str]]:
+        """Recharge l'historique complet d'une session pour réinjection UI.
+
+        Args:
+            session_id: identifiant de la session à charger
+
+        Returns:
+            Liste de messages dans l'ordre chronologique :
+                [{"role": "user"|"assistant", "content": str, "ts": datetime}, ...]
+        """
+        with self._session() as s:
+            msgs = (
+                s.query(Message)
+                .filter(Message.session_id == session_id)
+                .order_by(Message.ts.asc())
+                .all()
+            )
+            return [
+                {"role": m.role, "content": m.content, "ts": m.ts}
+                for m in msgs
+            ]
+
     # --- Preferences ---
 
     def upsert_preference(

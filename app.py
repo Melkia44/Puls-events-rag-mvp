@@ -532,6 +532,38 @@ def get_user_list() -> List[str]:
     return [u["name"] for u in users]
 
 
+def _format_sessions_for_sidebar(sessions: list) -> list:
+    """[SIDEBAR] Convertit list_user_sessions(...) en choices gr.Radio.
+
+    Format Gradio Radio : liste de tuples (label_affiché, value_id).
+    Label : "preview tronqué — DD/MM HH:MM"
+    """
+    if not sessions:
+        return []
+    formatted = []
+    for s in sessions:
+        preview = (s.get("preview") or "(sans titre)").strip()
+        if len(preview) > 45:
+            preview = preview[:42] + "..."
+        ts = s.get("last_message_at")
+        when = ts.strftime("%d/%m %H:%M") if ts else "?"
+        label = f"{preview}  ·  {when}"
+        formatted.append((label, s["session_id"]))
+    return formatted
+
+
+def _rebuild_chat_history(messages: list) -> List[Dict[str, str]]:
+    """[SIDEBAR] Convertit load_session_history(...) en format Gradio Chatbot.
+
+    Format Gradio messages : [{"role": "user|assistant", "content": str}, ...]
+    """
+    return [
+        {"role": m["role"], "content": m["content"]}
+        for m in messages
+        if m["role"] in ("user", "assistant")
+    ]
+
+
 def select_user(name: str, city: str) -> Tuple[Dict, Dict, str, str]:
     if not name or not name.strip():
         return {}, {}, "Aucun utilisateur sélectionné", ""
@@ -767,8 +799,66 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
     session_state = gr.State({})
 
     with gr.Row():
-        # ────────── Colonne gauche : mock d'auth + position ──────────
-        with gr.Column(scale=1):
+        # ────────── Colonne historique (gauche, sidebar conversations) ──────────
+        # [D1+] Sidebar style Claude.ai / ChatGPT : liste des sessions passées
+        # de l'utilisateur connecté, cliquables pour recharger la conversation.
+        with gr.Column(scale=1, min_width=220):
+            gr.Markdown("### 💬 Conversations")
+
+            new_conv_btn = gr.Button(
+                "➕ Nouvelle conversation",
+                variant="primary",
+            )
+
+            sessions_radio = gr.Radio(
+                choices=[],
+                label="",
+                interactive=True,
+                visible=False,
+                elem_id="sessions-list",
+            )
+
+            sessions_empty_msg = gr.Markdown(
+                "_Connecte-toi pour voir tes conversations._",
+                visible=True,
+            )
+
+        # ────────── Colonne centre : conversation ──────────
+        with gr.Column(scale=5):
+            chatbot = gr.Chatbot(
+                label="Conversation",
+                height=500,
+                type="messages",
+                value=WELCOME_MESSAGE,
+                allow_tags=True,
+            )
+
+            msg_input = gr.Textbox(
+                placeholder="Pose ta question sur les événements culturels…",
+                show_label=False,
+            )
+
+            # [D3] Une chip dédiée web (billetterie) ajoutée
+            # [TOP-8] Chips mises à jour pour démo multi-villes
+            gr.Examples(
+                examples=[
+                    ["Quels événements culturels ce week-end ?"],
+                    ["Tu te souviens de ce que j'aime ?"],
+                    ["Et à Paris, qu'est-ce qu'il y a ?"],
+                    ["Compare les festivals à Lyon et Marseille"],
+                    ["Y a-t-il encore des billets pour ce soir ?"],
+                ],
+                inputs=[msg_input],
+                label="💡 Suggestions",
+            )
+
+            send_btn = gr.Button("Envoyer", variant="primary")
+
+        # ────────── Colonne droite : profil + mode démo ──────────
+        # [UX] Déplacé de gauche à droite — convention Claude.ai / ChatGPT :
+        # historique à gauche (consulté en premier), profil à droite (config
+        # ponctuelle).
+        with gr.Column(scale=2, min_width=320):
             gr.Markdown("### 🔧 Mode démo — Simulation utilisateur")
             gr.Markdown(
                 "<small style='opacity:0.7;line-height:1.4;display:block;"
@@ -803,8 +893,6 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
 
             profile_display = gr.Markdown("_Aucun profil actif._")
 
-            new_conv_btn = gr.Button("🔄 Nouvelle conversation", variant="secondary")
-
             if SHOW_DEBUG:
                 gr.Markdown("---")
                 web_status = "✅" if (WEB_AGENT and BRAVE_CLIENT.is_available()) else (
@@ -822,37 +910,6 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
                     elem_id="debug-panel",
                 )
 
-        # ────────── Colonne droite : conversation ──────────
-        with gr.Column(scale=3):
-            chatbot = gr.Chatbot(
-                label="Conversation",
-                height=500,
-                type="messages",
-                value=WELCOME_MESSAGE,
-                allow_tags=True,
-            )
-
-            msg_input = gr.Textbox(
-                placeholder="Pose ta question sur les événements culturels…",
-                show_label=False,
-            )
-
-            # [D3] Une chip dédiée web (billetterie) ajoutée
-            # [TOP-8] Chips mises à jour pour démo multi-villes
-            gr.Examples(
-                examples=[
-                    ["Quels événements culturels ce week-end ?"],
-                    ["Tu te souviens de ce que j'aime ?"],
-                    ["Et à Paris, qu'est-ce qu'il y a ?"],
-                    ["Compare les festivals à Lyon et Marseille"],
-                    ["Y a-t-il encore des billets pour ce soir ?"],
-                ],
-                inputs=[msg_input],
-                label="💡 Suggestions",
-            )
-
-            send_btn = gr.Button("Envoyer", variant="primary")
-
     status_md = gr.Markdown(_status_line({}, ""))
 
     # ────────── Wiring ──────────
@@ -860,17 +917,79 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
     def on_select(existing_dropdown: str, new_name: str, city: str):
         name = new_name.strip() if new_name and new_name.strip() else existing_dropdown
         user_s, sess_s, profile, city_resolved = select_user(name, city)
+
+        # [SIDEBAR] Peupler la liste des sessions passées de l'utilisateur
+        sessions_choices = []
+        sidebar_empty_visible = True
+        sidebar_radio_visible = False
+        if user_s and user_s.get("id") and LTM is not None:
+            try:
+                sessions = LTM.list_user_sessions(user_s["id"], limit=20)
+                # Exclure la session courante (celle qu'on vient d'ouvrir)
+                current_sid = sess_s.get("id") if sess_s else None
+                sessions = [s for s in sessions if s["session_id"] != current_sid]
+                sessions_choices = _format_sessions_for_sidebar(sessions)
+                if sessions_choices:
+                    sidebar_empty_visible = False
+                    sidebar_radio_visible = True
+            except Exception as e:
+                logger.warning(f"Sidebar : échec list_user_sessions : {e}")
+
         return (
             user_s, sess_s, profile,
             gr.update(choices=get_user_list(), value=name),
             "",
             city_resolved,
+            # [SIDEBAR] 2 sorties supplémentaires
+            gr.update(choices=sessions_choices, value=None, visible=sidebar_radio_visible),
+            gr.update(visible=sidebar_empty_visible),
         )
+
+    def on_session_click(
+        session_id,           # peut être int ou None
+        short_term: ShortTermMemory,
+        user_state: Dict,
+    ):
+        """[SIDEBAR] Recharge une conversation passée depuis Supabase.
+
+        Effets :
+        - chatbot : rempli avec l'historique de la session sélectionnée
+        - short_term : neuf (cohérent avec new_conversation)
+        - session_state : pointe vers la session sélectionnée (devient active)
+        """
+        if not session_id or LTM is None:
+            return gr.update(), short_term, gr.update()
+
+        try:
+            messages = LTM.load_session_history(int(session_id))
+        except Exception as e:
+            logger.warning(f"Sidebar : échec load_session_history({session_id}) : {e}")
+            return gr.update(), short_term, gr.update()
+
+        chat_history = _rebuild_chat_history(messages)
+        new_short_term = ShortTermMemory(window_size=MEMORY_WINDOW_SIZE)
+        new_session_state = {"id": int(session_id)}
+
+        logger.info(
+            f"[SIDEBAR] Conversation #{session_id} rechargée "
+            f"({len(chat_history)} messages)"
+        )
+        return chat_history, new_short_term, new_session_state
+
+    sessions_radio.change(
+        fn=on_session_click,
+        inputs=[sessions_radio, short_term_state, user_state],
+        outputs=[chatbot, short_term_state, session_state],
+    )
 
     select_btn.click(
         fn=on_select,
         inputs=[user_dropdown, new_user_input, city_input],
-        outputs=[user_state, session_state, profile_display, user_dropdown, new_user_input, city_input],
+        outputs=[
+            user_state, session_state, profile_display,
+            user_dropdown, new_user_input, city_input,
+            sessions_radio, sessions_empty_msg,   # [SIDEBAR]
+        ],
     )
 
     send_btn.click(
