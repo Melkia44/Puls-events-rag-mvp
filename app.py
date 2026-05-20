@@ -55,7 +55,6 @@ import gradio as gr
 from langchain_mistralai import ChatMistralAI
 
 # === Langfuse — Observabilité LLM (D4) ===
-from langfuse import observe, get_client
 from langfuse.langchain import CallbackHandler
 
 from utils.config import (
@@ -1022,10 +1021,37 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
         )
         return chat_history, new_short_term, new_session_state
 
+    def on_feedback(data: gr.LikeData, user_state: Dict, session_state: Dict):
+        """[US-704] Persiste un vote 👍/👎 sur une réponse (CSAT D4).
+
+        Fire-and-forget : aucun output UI, on archive juste en base. Sans
+        utilisateur/session actif on ignore silencieusement (feedback non
+        rattachable).
+        """
+        if LTM is None or not user_state or "id" not in user_state:
+            return
+        session_id = session_state.get("id") if session_state else None
+        if not session_id:
+            return
+        rating = 1 if data.liked else -1
+        try:
+            LTM.add_feedback(session_id, user_state["id"], rating)
+            logger.info(
+                f"[US-704] Feedback {'👍' if rating == 1 else '👎'} "
+                f"(session={session_id}, user={user_state['id']})"
+            )
+        except Exception as e:
+            logger.warning(f"[US-704] Échec add_feedback : {e}")
+
     sessions_radio.change(
         fn=on_session_click,
         inputs=[sessions_radio, short_term_state, user_state],
         outputs=[chatbot, short_term_state, session_state],
+    )
+
+    chatbot.like(
+        fn=on_feedback,
+        inputs=[user_state, session_state],
     )
 
     select_btn.click(

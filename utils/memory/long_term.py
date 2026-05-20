@@ -23,7 +23,7 @@ from contextlib import contextmanager
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Float, ForeignKey,
-    UniqueConstraint, Index, text,
+    UniqueConstraint, Index, CheckConstraint, func, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
@@ -102,6 +102,33 @@ class Preference(Base):
     ts = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="preferences")
+
+
+class Feedback(Base):
+    """Vote 👍/👎 d'un utilisateur sur une réponse (US-704, D4 CSAT).
+
+    rating ∈ {1, -1} : 1 = pouce haut, -1 = pouce bas. Contrainte CHECK
+    en base pour rejeter toute autre valeur même hors ORM.
+    """
+    __tablename__ = "feedback"
+    __table_args__ = (
+        CheckConstraint("rating IN (1, -1)", name="ck_feedback_rating"),
+        Index("idx_feedback_session", "session_id"),
+        Index("idx_feedback_user", "user_id"),
+        Index("idx_feedback_created_at", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("conversation_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    rating = Column(Integer, nullable=False)  # 1 = 👍, -1 = 👎
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # ============================================================================
@@ -281,8 +308,6 @@ class LongTermMemory:
                     "msg_count": int,
                 }, ...]
         """
-        from sqlalchemy import func
-
         with self._session() as s:
             # Sessions de cet utilisateur — borne la sous-requête preview
             # à ses propres messages (sinon DISTINCT ON scanne la table
@@ -366,6 +391,52 @@ class LongTermMemory:
                 {"role": m.role, "content": m.content, "ts": m.ts}
                 for m in msgs
             ]
+
+    # --- Feedback (US-704, D4 CSAT) ---
+
+    def add_feedback(self, session_id: int, user_id: int, rating: int) -> None:
+        """Enregistre un vote 👍 (rating=1) ou 👎 (rating=-1) sur une réponse.
+
+        Idempotence volontairement non gérée : on archive chaque clic
+        (un utilisateur peut changer d'avis ; l'agrégat CSAT prendra le
+        dernier état via la fenêtre temporelle si besoin). rating hors
+        {1,-1} est rejeté en amont ET par la contrainte CHECK en base.
+        """
+        if rating not in (1, -1):
+            logger.warning(f"add_feedback : rating invalide {rating!r}, ignoré")
+            return
+        with self._session() as s:
+            s.add(Feedback(
+                session_id=session_id, user_id=user_id, rating=rating,
+            ))
+
+    def get_csat(self, user_id: Optional[int] = None) -> Dict[str, Any]:
+        """Agrégat CSAT : 👍, 👎, total et score (% de 👍).
+
+        Args:
+            user_id: si fourni, restreint au périmètre d'un utilisateur ;
+                sinon agrégat global (tous utilisateurs).
+
+        Returns:
+            {"thumbs_up": int, "thumbs_down": int, "total": int,
+             "csat": float|None}  — csat = up / total (0..1), None si total=0.
+        """
+        with self._session() as s:
+            q = s.query(
+                func.count().filter(Feedback.rating == 1).label("up"),
+                func.count().filter(Feedback.rating == -1).label("down"),
+                func.count(Feedback.id).label("total"),
+            )
+            if user_id is not None:
+                q = q.filter(Feedback.user_id == user_id)
+            row = q.one()
+            total = row.total or 0
+            return {
+                "thumbs_up": row.up or 0,
+                "thumbs_down": row.down or 0,
+                "total": total,
+                "csat": round((row.up or 0) / total, 3) if total else None,
+            }
 
     # --- Preferences ---
 
