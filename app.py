@@ -55,7 +55,31 @@ import gradio as gr
 from langchain_mistralai import ChatMistralAI
 
 # === Langfuse — Observabilité LLM (D4) ===
-from langfuse.langchain import CallbackHandler
+# Import défensif : si Langfuse est absent/incompatible, on bascule sur des
+# stubs no-op pour que l'app tourne sans observabilité (dégradation gracieuse).
+# API v3/v4 : `observe` + `get_client` viennent du package racine `langfuse`
+# (le module `langfuse.decorators` de la v2 n'existe plus).
+try:
+    from langfuse import observe, get_client
+    from langfuse.langchain import CallbackHandler
+    LANGFUSE_OK = True
+except ImportError:
+    LANGFUSE_OK = False
+
+    def observe(*args, **kwargs):
+        """Stub no-op : supporte @observe et @observe(name=...)."""
+        if args and callable(args[0]):
+            return args[0]
+
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    def get_client():
+        return None
+
+    CallbackHandler = None
 
 from utils.config import (
     CHAT_MODEL, EXTRACTION_MODEL, EMBEDDING_MODEL,
@@ -142,15 +166,22 @@ LLM_ROUTER = ChatMistralAI(
 # + latence + coût € remontent au dashboard Langfuse. Dégradation
 # gracieuse (None) si clés absentes/invalides — l'observabilité D4 ne
 # doit jamais faire tomber l'app.
-try:
-    LANGFUSE_HANDLER = CallbackHandler()
-    logger.info(
-        f"Langfuse callback initialisé "
-        f"(host={os.getenv('LANGFUSE_HOST', 'défaut SDK')})"
+if not LANGFUSE_OK:
+    logger.warning(
+        "Langfuse non importable — observabilité D4 ET capture trace_id "
+        "désactivées (le vote restera persisté sans langfuse_trace_id)."
     )
-except Exception as e:
-    logger.error(f"Échec init Langfuse : {e} — observabilité D4 désactivée")
     LANGFUSE_HANDLER = None
+else:
+    try:
+        LANGFUSE_HANDLER = CallbackHandler()
+        logger.info(
+            f"Langfuse callback initialisé "
+            f"(host={os.getenv('LANGFUSE_HOST', 'défaut SDK')})"
+        )
+    except Exception as e:
+        logger.error(f"Échec init Langfuse : {e} — observabilité D4 désactivée")
+        LANGFUSE_HANDLER = None
 
 
 # [D3] Whitelist de domaines + agent web
@@ -639,15 +670,17 @@ def select_user(name: str, city: str) -> Tuple[Dict, Dict, str, str]:
     return user_state, session_state, profile_display, city_to_display
 
 
+@observe(name="puls_events_respond")
 def respond(
     message: str,
     chat_history: List[Dict],
     short_term: ShortTermMemory,
     user_state: Dict,
     session_state: Dict,
-) -> Tuple[str, List[Dict], ShortTermMemory]:
+    feedback_meta: Dict[int, Dict],
+) -> Tuple[str, List[Dict], ShortTermMemory, Dict[int, Dict]]:
     if not message or not message.strip():
-        return "", chat_history, short_term
+        return "", chat_history, short_term, feedback_meta
 
     if not user_state or "id" not in user_state:
         warning = "⚠️ Active d'abord un profil de démonstration dans la barre latérale."
@@ -655,7 +688,7 @@ def respond(
             {"role": "user", "content": message},
             {"role": "assistant", "content": warning},
         ]
-        return "", chat_history, short_term
+        return "", chat_history, short_term, feedback_meta
 
     user_id = user_state["id"]
     session_id = session_state.get("id") if session_state else None
@@ -729,18 +762,40 @@ def respond(
     # Mémoire courte = version sans HTML (pas de pollution du contexte)
     short_term.add_turn(message, response_clean)
 
+    # [D4] message_id de la réponse assistant — clé d'attribution du vote
+    assistant_msg_id = None
     if LTM is not None and session_id:
         try:
             LTM.log_message(session_id, "user", message)
-            LTM.log_message(session_id, "assistant", response_clean)
+            assistant_msg_id = LTM.log_message(session_id, "assistant", response_clean)
         except Exception as e:
             logger.warning(f"Échec log message : {e}")
+
+    # [D4] trace_id Langfuse de cet échange (None si obs. désactivée/hors contexte)
+    trace_id = None
+    if LANGFUSE_OK:
+        try:
+            client = get_client()
+            trace_id = client.get_current_trace_id() if client else None
+        except Exception as exc:
+            logger.warning("Langfuse trace_id indisponible : %s", exc)
 
     chat_history = chat_history + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": response_with_extras},
     ]
-    return "", chat_history, short_term
+
+    # [D4] On indexe les métadonnées d'attribution par la position du message
+    # assistant dans le chatbot (gr.LikeData.index renverra cette position).
+    # response_snapshot = version SANS HTML (response_clean), pour l'analyse.
+    feedback_meta = dict(feedback_meta or {})
+    feedback_meta[len(chat_history) - 1] = {
+        "message_id": assistant_msg_id,
+        "trace_id": trace_id,
+        "question": message,
+        "response": response_clean,
+    }
+    return "", chat_history, short_term, feedback_meta
 
 
 WELCOME_MESSAGE = [{
@@ -763,9 +818,11 @@ def new_conversation(
     short_term: ShortTermMemory,
     user_state: Dict,
     session_state: Dict,
-) -> Tuple[List[Dict], ShortTermMemory, Dict, str]:
+) -> Tuple[List[Dict], ShortTermMemory, Dict, str, Dict]:
+    # [D4] Le 5e retour ({}) réinitialise feedback_meta : le chatbot est
+    # reconstruit, les anciens index de message ne sont plus valides.
     if not user_state or "id" not in user_state:
-        return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), {}, "Pas d'utilisateur actif."
+        return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), {}, "Pas d'utilisateur actif.", {}
 
     user_id = user_state["id"]
     old_session_id = session_state.get("id") if session_state else None
@@ -786,7 +843,7 @@ def new_conversation(
     if n_extracted > 0:
         info += f" {n_extracted} préférence(s) extraite(s) de la précédente session."
 
-    return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), new_state, profile_display + f"\n\n{info}"
+    return list(WELCOME_MESSAGE), ShortTermMemory(window_size=MEMORY_WINDOW_SIZE), new_state, profile_display + f"\n\n{info}", {}
 
 
 def _status_line(user_state: Dict, city: str = "") -> str:
@@ -808,6 +865,68 @@ def _status_line(user_state: Dict, city: str = "") -> str:
 
 
 # ============================================================================
+# [D4] MONITORING CSAT — dashboard satisfaction utilisateur
+# ============================================================================
+
+def _format_csat_card(stats: Dict[str, Any], stats_7j: Dict[str, Any]) -> str:
+    """Carte Markdown du CSAT global, colorisée selon le score.
+
+    Code couleur métier : 🟢 >=75 %, 🟠 50–75 %, 🔴 <50 %. Affiche aussi la
+    tendance sur 7 jours glissants (↗/↘/→) et la date du dernier vote.
+    """
+    csat = stats.get("csat")
+    if csat is None:
+        return "### 📊 CSAT — _Aucun vote pour le moment_"
+
+    if csat >= 0.75:
+        emoji, statut = "🟢", "Bon"
+    elif csat >= 0.5:
+        emoji, statut = "🟠", "À surveiller"
+    else:
+        emoji, statut = "🔴", "Alerte"
+
+    trend = ""
+    csat_7j = stats_7j.get("csat")
+    if csat_7j is not None:
+        delta = csat_7j - csat
+        if abs(delta) < 0.05:
+            arrow = "→"
+        else:
+            arrow = "↗" if delta > 0 else "↘"
+        trend = f" — Tendance 7j : **{csat_7j:.0%}** {arrow}"
+
+    last = stats.get("last_vote")
+    last_str = last.strftime("%d/%m/%Y %H:%M") if last else "—"
+
+    return (
+        f"## CSAT global : **{csat:.0%}** {emoji} _{statut}_{trend}\n\n"
+        f"- 👍 {stats['thumbs_up']} · 👎 {stats['thumbs_down']} "
+        f"· **{stats['total']} votes** au total\n"
+        f"- Dernier vote : {last_str}"
+    )
+
+
+def refresh_csat_dashboard() -> Tuple[str, List[List]]:
+    """Callback du panneau monitoring : recalcule carte CSAT + top utilisateurs.
+
+    Lit la donnée live depuis Supabase via la façade LTM (un seul pool).
+    """
+    if LTM is None:
+        return "### 📊 CSAT — _Base de données indisponible_", []
+    glob = LTM.get_csat()
+    week = LTM.get_csat(window_days=7)
+    per_user = LTM.get_csat_per_user(limit=10)
+    table = [
+        [
+            u["name"], u["total"], u["thumbs_up"], u["thumbs_down"],
+            f"{u['csat']:.0%}" if u["csat"] is not None else "—",
+        ]
+        for u in per_user
+    ]
+    return _format_csat_card(glob, week), table
+
+
+# ============================================================================
 # BUILD UI
 # ============================================================================
 
@@ -826,120 +945,144 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
     short_term_state = gr.State(ShortTermMemory(window_size=MEMORY_WINDOW_SIZE))
     user_state = gr.State({})
     session_state = gr.State({})
+    # [D4] Métadonnées d'attribution des votes : {index_message_chatbot ->
+    # {message_id, trace_id, question, response}}. Peuplé par respond(), lu
+    # par on_like (gr.LikeData.index), réinitialisé à chaque reconstruction
+    # du chatbot (nouvelle conversation / session rechargée).
+    feedback_meta_state = gr.State({})
 
-    with gr.Row():
-        # ────────── Colonne historique (gauche, sidebar conversations) ──────────
-        # [D1+] Sidebar style Claude.ai / ChatGPT : liste des sessions passées
-        # de l'utilisateur connecté, cliquables pour recharger la conversation.
-        with gr.Column(scale=1, min_width=220):
-            gr.Markdown("### 💬 Conversations")
+    with gr.Tabs():
+        with gr.Tab("💬 Chat"):
+            with gr.Row():
+                # ────────── Colonne historique (gauche, sidebar conversations) ──────────
+                # [D1+] Sidebar style Claude.ai / ChatGPT : liste des sessions passées
+                # de l'utilisateur connecté, cliquables pour recharger la conversation.
+                with gr.Column(scale=1, min_width=220):
+                    gr.Markdown("### 💬 Conversations")
 
-            new_conv_btn = gr.Button(
-                "➕ Nouvelle conversation",
-                variant="primary",
-            )
+                    new_conv_btn = gr.Button(
+                        "➕ Nouvelle conversation",
+                        variant="primary",
+                    )
 
-            sessions_radio = gr.Radio(
-                choices=[],
-                label="",
-                interactive=True,
-                visible=False,
-                elem_id="sessions-list",
-            )
+                    sessions_radio = gr.Radio(
+                        choices=[],
+                        label="",
+                        interactive=True,
+                        visible=False,
+                        elem_id="sessions-list",
+                    )
 
-            sessions_empty_msg = gr.Markdown(
-                "_Connecte-toi pour voir tes conversations._",
-                visible=True,
-            )
+                    sessions_empty_msg = gr.Markdown(
+                        "_Connecte-toi pour voir tes conversations._",
+                        visible=True,
+                    )
 
-        # ────────── Colonne centre : conversation ──────────
-        with gr.Column(scale=5):
-            chatbot = gr.Chatbot(
-                label="Conversation",
-                height=500,
-                type="messages",
-                value=WELCOME_MESSAGE,
-                allow_tags=True,
-            )
+                # ────────── Colonne centre : conversation ──────────
+                with gr.Column(scale=5):
+                    chatbot = gr.Chatbot(
+                        label="Conversation",
+                        height=500,
+                        type="messages",
+                        value=WELCOME_MESSAGE,
+                        allow_tags=True,
+                    )
 
-            msg_input = gr.Textbox(
-                placeholder="Pose ta question sur les événements culturels…",
-                show_label=False,
-            )
+                    msg_input = gr.Textbox(
+                        placeholder="Pose ta question sur les événements culturels…",
+                        show_label=False,
+                    )
 
-            # [D3] Une chip dédiée web (billetterie) ajoutée
-            # [TOP-8] Chips mises à jour pour démo multi-villes
-            gr.Examples(
-                examples=[
-                    ["Quels événements culturels ce week-end ?"],
-                    ["Tu te souviens de ce que j'aime ?"],
-                    ["Et à Paris, qu'est-ce qu'il y a ?"],
-                    ["Compare les festivals à Lyon et Marseille"],
-                    ["Y a-t-il encore des billets pour ce soir ?"],
-                ],
-                inputs=[msg_input],
-                label="💡 Suggestions",
-            )
+                    # [D3] Une chip dédiée web (billetterie) ajoutée
+                    # [TOP-8] Chips mises à jour pour démo multi-villes
+                    gr.Examples(
+                        examples=[
+                            ["Quels événements culturels ce week-end ?"],
+                            ["Tu te souviens de ce que j'aime ?"],
+                            ["Et à Paris, qu'est-ce qu'il y a ?"],
+                            ["Compare les festivals à Lyon et Marseille"],
+                            ["Y a-t-il encore des billets pour ce soir ?"],
+                        ],
+                        inputs=[msg_input],
+                        label="💡 Suggestions",
+                    )
 
-            send_btn = gr.Button("Envoyer", variant="primary")
+                    send_btn = gr.Button("Envoyer", variant="primary")
 
-        # ────────── Colonne droite : profil + mode démo ──────────
-        # [UX] Déplacé de gauche à droite — convention Claude.ai / ChatGPT :
-        # historique à gauche (consulté en premier), profil à droite (config
-        # ponctuelle).
-        with gr.Column(scale=2, min_width=320):
-            gr.Markdown("### 🔧 Mode démo — Simulation utilisateur")
+                # ────────── Colonne droite : profil + mode démo ──────────
+                # [UX] Déplacé de gauche à droite — convention Claude.ai / ChatGPT :
+                # historique à gauche (consulté en premier), profil à droite (config
+                # ponctuelle).
+                with gr.Column(scale=2, min_width=320):
+                    gr.Markdown("### 🔧 Mode démo — Simulation utilisateur")
+                    gr.Markdown(
+                        "<small style='opacity:0.7;line-height:1.4;display:block;"
+                        "padding:0.3em 0 0.7em;'>"
+                        "En production, cette zone serait remplacée par une "
+                        "authentification <b>Supabase Auth</b> (magic link email). "
+                        "Pour la démonstration, choisis ou crée un profil ci-dessous "
+                        "pour activer la mémoire conversationnelle <i>(défi D1)</i>."
+                        "</small>",
+                    )
+
+                    user_dropdown = gr.Dropdown(
+                        choices=get_user_list(),
+                        label="Profil de démonstration",
+                        interactive=True,
+                        allow_custom_value=True,
+                    )
+
+                    new_user_input = gr.Textbox(
+                        label="…ou créer un profil de test",
+                        placeholder="Ex: Léa, Thomas, …",
+                    )
+
+                    city_input = gr.Textbox(
+                        label="📍 Ta ville",
+                        placeholder="Ex: Nantes, Saint-Nazaire, …",
+                        info="Géocodée à la connexion. Override possible en disant "
+                             "« à [autre ville] » dans une question.",
+                    )
+
+                    select_btn = gr.Button("Simuler la connexion", variant="primary")
+
+                    profile_display = gr.Markdown("_Aucun profil actif._")
+
+                    if SHOW_DEBUG:
+                        gr.Markdown("---")
+                        web_status = "✅" if (WEB_AGENT and BRAVE_CLIENT.is_available()) else (
+                            "🟡 DDG only" if WEB_AGENT else "❌"
+                        )
+                        gr.Markdown(
+                            f"**Modèle** : `{CHAT_MODEL}`\n\n"
+                            f"**Routeur D3** : `{EXTRACTION_MODEL}`\n\n"
+                            f"**Mémoire courte** : {MEMORY_WINDOW_SIZE} tours\n\n"
+                            f"**Index** : `{FAISS_INDEX_PATH}`\n\n"
+                            f"**Top-K géo** : {RETRIEVER_K_GEO} → {RETRIEVER_K}\n\n"
+                            f"**Rayon défaut** : {DEFAULT_RADIUS_KM} km\n\n"
+                            f"**Agent web (D3)** : {web_status}\n\n"
+                            f"**Whitelist** : {WHITELIST.count() if WHITELIST else 0} domaines",
+                            elem_id="debug-panel",
+                        )
+
+            status_md = gr.Markdown(_status_line({}, ""))
+
+        with gr.Tab("📊 Monitoring CSAT"):
+            gr.Markdown("### Satisfaction utilisateur — données live Supabase")
             gr.Markdown(
-                "<small style='opacity:0.7;line-height:1.4;display:block;"
-                "padding:0.3em 0 0.7em;'>"
-                "En production, cette zone serait remplacée par une "
-                "authentification <b>Supabase Auth</b> (magic link email). "
-                "Pour la démonstration, choisis ou crée un profil ci-dessous "
-                "pour activer la mémoire conversationnelle <i>(défi D1)</i>."
-                "</small>",
+                "<small style='opacity:0.7;'>Votes 👍/👎 collectés sous chaque "
+                "réponse de l'assistant (US-704). Clique sur Rafraîchir pour "
+                "recharger l'agrégat depuis Supabase.</small>"
             )
-
-            user_dropdown = gr.Dropdown(
-                choices=get_user_list(),
-                label="Profil de démonstration",
-                interactive=True,
-                allow_custom_value=True,
+            csat_card = gr.Markdown()
+            csat_table = gr.Dataframe(
+                headers=["utilisateur", "total", "👍", "👎", "csat"],
+                datatype=["str", "number", "number", "number", "str"],
+                label="Top 10 utilisateurs par volume de votes",
+                wrap=True,
+                interactive=False,
             )
-
-            new_user_input = gr.Textbox(
-                label="…ou créer un profil de test",
-                placeholder="Ex: Léa, Thomas, …",
-            )
-
-            city_input = gr.Textbox(
-                label="📍 Ta ville",
-                placeholder="Ex: Nantes, Saint-Nazaire, …",
-                info="Géocodée à la connexion. Override possible en disant "
-                     "« à [autre ville] » dans une question.",
-            )
-
-            select_btn = gr.Button("Simuler la connexion", variant="primary")
-
-            profile_display = gr.Markdown("_Aucun profil actif._")
-
-            if SHOW_DEBUG:
-                gr.Markdown("---")
-                web_status = "✅" if (WEB_AGENT and BRAVE_CLIENT.is_available()) else (
-                    "🟡 DDG only" if WEB_AGENT else "❌"
-                )
-                gr.Markdown(
-                    f"**Modèle** : `{CHAT_MODEL}`\n\n"
-                    f"**Routeur D3** : `{EXTRACTION_MODEL}`\n\n"
-                    f"**Mémoire courte** : {MEMORY_WINDOW_SIZE} tours\n\n"
-                    f"**Index** : `{FAISS_INDEX_PATH}`\n\n"
-                    f"**Top-K géo** : {RETRIEVER_K_GEO} → {RETRIEVER_K}\n\n"
-                    f"**Rayon défaut** : {DEFAULT_RADIUS_KM} km\n\n"
-                    f"**Agent web (D3)** : {web_status}\n\n"
-                    f"**Whitelist** : {WHITELIST.count() if WHITELIST else 0} domaines",
-                    elem_id="debug-panel",
-                )
-
-    status_md = gr.Markdown(_status_line({}, ""))
+            csat_refresh_btn = gr.Button("🔄 Rafraîchir", variant="primary")
 
     # ────────── Wiring ──────────
 
@@ -987,12 +1130,12 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
         - session_state : pointe vers la session sélectionnée (devient active)
         """
         if not session_id or LTM is None:
-            return gr.update(), short_term, gr.update()
+            return gr.update(), short_term, gr.update(), gr.update()
 
         user_id = user_state.get("id") if user_state else None
         if user_id is None:
             logger.warning("Sidebar : clic session sans utilisateur actif — ignoré")
-            return gr.update(), short_term, gr.update()
+            return gr.update(), short_term, gr.update(), gr.update()
 
         # Garde anti-IDOR : les session_id sont des entiers séquentiels
         # devinables — on refuse de charger une session hors périmètre de
@@ -1003,13 +1146,13 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
                 f"Sidebar : session {session_id} hors périmètre user "
                 f"{user_id} — refus"
             )
-            return gr.update(), short_term, gr.update()
+            return gr.update(), short_term, gr.update(), gr.update()
 
         try:
             messages = LTM.load_session_history(int(session_id))
         except Exception as e:
             logger.warning(f"Sidebar : échec load_session_history({session_id}) : {e}")
-            return gr.update(), short_term, gr.update()
+            return gr.update(), short_term, gr.update(), gr.update()
 
         chat_history = _rebuild_chat_history(messages)
         new_short_term = ShortTermMemory(window_size=MEMORY_WINDOW_SIZE)
@@ -1019,26 +1162,63 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
             f"[SIDEBAR] Conversation #{session_id} rechargée "
             f"({len(chat_history)} messages)"
         )
-        return chat_history, new_short_term, new_session_state
+        # 4e retour {} : reset feedback_meta — les index repartent de zéro.
+        # (Conséquence : voter sur un message d'une session rechargée n'aura
+        #  pas de métadonnées d'attribution ; le vote brut est tout de même
+        #  persisté pour préserver le signal CSAT — cf. on_like.)
+        return chat_history, new_short_term, new_session_state, {}
 
-    def on_feedback(data: gr.LikeData, user_state: Dict, session_state: Dict):
-        """[US-704] Persiste un vote 👍/👎 sur une réponse (CSAT D4).
+    def on_like(
+        evt: gr.LikeData,
+        user_state: Dict,
+        session_state: Dict,
+        feedback_meta: Dict[int, Dict],
+    ):
+        """[US-704 / D4] Persiste un vote 👍/👎 avec attribution au message.
 
-        Fire-and-forget : aucun output UI, on archive juste en base. Sans
-        utilisateur/session actif on ignore silencieusement (feedback non
-        rattachable).
+        Récupère via `evt.index` (position du message voté dans le chatbot)
+        les métadonnées d'attribution stockées par respond() : message_id,
+        trace_id Langfuse, et snapshots question/réponse. Fire-and-forget
+        (aucun output UI). Sans utilisateur/session actif → on ignore.
+
+        Si le message voté n'a pas de métadonnées (ex. session rechargée
+        depuis l'historique), on persiste quand même le vote brut pour ne pas
+        perdre le signal CSAT, en loggant un warning.
         """
         if LTM is None or not user_state or "id" not in user_state:
             return
         session_id = session_state.get("id") if session_state else None
         if not session_id:
             return
-        rating = 1 if data.liked else -1
+
+        rating = 1 if evt.liked else -1
+        idx = evt.index
+        if isinstance(idx, (list, tuple)):  # robustesse selon type de chatbot
+            idx = idx[0] if idx else None
+        meta = (feedback_meta or {}).get(idx) if idx is not None else None
+
         try:
-            LTM.add_feedback(session_id, user_state["id"], rating)
+            if meta is None:
+                logger.warning(
+                    f"[US-704] Vote sans métadonnées (index={evt.index}) — "
+                    f"message probablement rechargé ; vote brut persisté."
+                )
+                fb_id = LTM.add_feedback(session_id, user_state["id"], rating)
+            else:
+                fb_id = LTM.add_feedback(
+                    session_id=session_id,
+                    user_id=user_state["id"],
+                    rating=rating,
+                    message_id=meta.get("message_id"),
+                    question_snapshot=meta.get("question"),
+                    response_snapshot=meta.get("response"),
+                    langfuse_trace_id=meta.get("trace_id"),
+                )
             logger.info(
                 f"[US-704] Feedback {'👍' if rating == 1 else '👎'} "
-                f"(session={session_id}, user={user_state['id']})"
+                f"(fb={fb_id}, msg={meta.get('message_id') if meta else None}, "
+                f"trace={'oui' if (meta and meta.get('trace_id')) else 'non'}, "
+                f"session={session_id})"
             )
         except Exception as e:
             logger.warning(f"[US-704] Échec add_feedback : {e}")
@@ -1046,12 +1226,12 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
     sessions_radio.change(
         fn=on_session_click,
         inputs=[sessions_radio, short_term_state, user_state],
-        outputs=[chatbot, short_term_state, session_state],
+        outputs=[chatbot, short_term_state, session_state, feedback_meta_state],
     )
 
     chatbot.like(
-        fn=on_feedback,
-        inputs=[user_state, session_state],
+        fn=on_like,
+        inputs=[user_state, session_state, feedback_meta_state],
     )
 
     select_btn.click(
@@ -1066,20 +1246,20 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
 
     send_btn.click(
         fn=respond,
-        inputs=[msg_input, chatbot, short_term_state, user_state, session_state],
-        outputs=[msg_input, chatbot, short_term_state],
+        inputs=[msg_input, chatbot, short_term_state, user_state, session_state, feedback_meta_state],
+        outputs=[msg_input, chatbot, short_term_state, feedback_meta_state],
     )
 
     msg_input.submit(
         fn=respond,
-        inputs=[msg_input, chatbot, short_term_state, user_state, session_state],
-        outputs=[msg_input, chatbot, short_term_state],
+        inputs=[msg_input, chatbot, short_term_state, user_state, session_state, feedback_meta_state],
+        outputs=[msg_input, chatbot, short_term_state, feedback_meta_state],
     )
 
     new_conv_btn.click(
         fn=new_conversation,
         inputs=[short_term_state, user_state, session_state],
-        outputs=[chatbot, short_term_state, session_state, profile_display],
+        outputs=[chatbot, short_term_state, session_state, profile_display, feedback_meta_state],
     )
 
     user_state.change(
@@ -1091,6 +1271,16 @@ with gr.Blocks(theme=PULS_THEME, title="Puls · Événements culturels en France
         fn=_status_line,
         inputs=[user_state, city_input],
         outputs=[status_md],
+    )
+
+    # [D4] Monitoring CSAT — chargement au boot + bouton rafraîchir
+    demo.load(
+        fn=refresh_csat_dashboard,
+        outputs=[csat_card, csat_table],
+    )
+    csat_refresh_btn.click(
+        fn=refresh_csat_dashboard,
+        outputs=[csat_card, csat_table],
     )
 
 
