@@ -29,3 +29,8 @@ langfuse>=3.0.0
 # === RAGAS — Évaluation qualité RAG (D4) ===
 ragas>=0.4.0
 datasets>=4.0.0
+
+# Manipulation de données — lecture de la vue reponses_ratees
+# (get_failed_responses). Déjà tiré transitivement par RAGAS, épinglé
+# explicitement car le code en dépend directement.
+pandas>=2.0,<3.0
