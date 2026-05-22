@@ -294,15 +294,21 @@ class LongTermMemory:
     # --- [D2] Géolocalisation utilisateur ---
 
     def set_user_city(
-        self, user_id: int, city: str, lat: float, lng: float,
+        self, user_id: int, city: str,
+        lat: Optional[float] = None, lng: Optional[float] = None,
     ) -> None:
-        """Persiste la ville et ses coordonnées géocodées pour un utilisateur.
+        """Persiste la ville et ses coordonnées (éventuellement nulles).
+
+        [fix D2] lat/lng sont optionnels : si le géocodage a échoué, on persiste
+        tout de même le NOM de ville en mettant les coordonnées à NULL. Le filtre
+        géographique D2 reste alors inactif (pas de coords trompeuses d'une
+        ancienne ville), mais l'affichage et la cohérence de profil sont préservés.
 
         Args:
             user_id: identifiant interne
             city: nom de ville saisi par l'utilisateur (conservé tel quel pour
                 l'affichage UI, pas normalisé)
-            lat, lng: coordonnées issues du géocodage Nominatim
+            lat, lng: coordonnées géocodées, ou None si géocodage indisponible.
         """
         with self._session() as s:
             user = s.get(User, user_id)
@@ -312,7 +318,13 @@ class LongTermMemory:
             user.city = city
             user.city_lat = lat
             user.city_lng = lng
-            logger.info(f"Ville '{city}' enregistrée pour user_id={user_id}")
+            if lat is None or lng is None:
+                logger.info(
+                    f"Ville '{city}' enregistrée SANS coordonnées pour "
+                    f"user_id={user_id} (filtre géo inactif)"
+                )
+            else:
+                logger.info(f"Ville '{city}' enregistrée pour user_id={user_id}")
 
     def get_user_city(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Retourne le dict {city, lat, lng} ou None si non renseigné."""

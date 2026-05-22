@@ -19,6 +19,8 @@ from utils.geo import (
     extract_location_override,
     filter_by_radius,
     geocode_city,
+    lookup_top8,
+    CITIES_TOP8,
     DEFAULT_RADIUS_KM,
 )
 
@@ -246,3 +248,66 @@ class TestGeocodingLive:
         elapsed = time.time() - t0
         assert result is not None
         assert elapsed < 0.1, f"Cache miss probable, {elapsed:.2f}s"
+
+
+# ============================================================================
+# Test — Fallback géocodeur TOP-8 (fix D2, Étape A)
+# ============================================================================
+
+class TestTop8Fallback:
+    """lookup_top8 : géocodage local des 8 métropoles, sans réseau."""
+
+    def test_top8_hit(self):
+        """Ville du TOP-8 → coordonnées en dur (insensible à la casse)."""
+        assert lookup_top8("PARIS") == (48.8566, 2.3522)
+
+    def test_top8_miss(self):
+        """Ville hors TOP-8 → None (le caller fallback sur Nominatim)."""
+        assert lookup_top8("Saint-Brieuc") is None
+
+    def test_top8_casse_et_accents(self):
+        """Insensible à la casse ET aux accents."""
+        assert lookup_top8("Nantes") == lookup_top8("nantes") == lookup_top8("NANTES")
+        assert lookup_top8("Strásbourg") == CITIES_TOP8["strasbourg"]
+
+    def test_top8_empty(self):
+        """Chaîne vide → None (pas de KeyError)."""
+        assert lookup_top8("") is None
+        assert lookup_top8("   ") is None
+
+    def test_geocode_city_court_circuite_nominatim(self):
+        """geocode_city résout une ville TOP-8 sans appel réseau (offline)."""
+        # Pas de marqueur @network : doit passer hors connexion grâce au TOP-8.
+        assert geocode_city("Lyon") == (45.7640, 4.8357)
+
+
+# ============================================================================
+# Test — Dégradation gracieuse set_user_city sans coordonnées (fix D2, Étape B)
+# ============================================================================
+
+class TestSetUserCityDegradation:
+    """set_user_city persiste le nom même quand le géocodage a échoué.
+
+    Utilise la fixture `ltm` (SQLite in-memory) de conftest.py.
+    """
+
+    def test_persist_city_without_coords(self, ltm):
+        """Géocodage None → city persistée, lat/lng à NULL."""
+        uid = ltm.get_or_create_user("test_user")
+        ltm.set_user_city(uid, "Saint-Brieuc", None, None)
+
+        row = ltm.get_user_city(uid)
+        assert row["city"] == "Saint-Brieuc"
+        assert row["lat"] is None
+        assert row["lng"] is None
+
+    def test_recover_coords_on_next_set(self, ltm):
+        """Re-set avec coords valides → écrase l'état sans coords (cf. table fix)."""
+        uid = ltm.get_or_create_user("test_user")
+        ltm.set_user_city(uid, "Saint-Brieuc", None, None)      # sans coords
+        ltm.set_user_city(uid, "Paris", 48.8566, 2.3522)        # puis avec coords
+
+        row = ltm.get_user_city(uid)
+        assert row["city"] == "Paris"
+        assert row["lat"] == pytest.approx(48.8566)
+        assert row["lng"] == pytest.approx(2.3522)

@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -169,6 +170,50 @@ def _get_cache() -> GeocodingCache:
 # GEOCODAGE
 # ============================================================================
 
+# ============================================================================
+# FALLBACK TOP-8 — géocodage local des métropoles couvertes par le dataset
+# ============================================================================
+# [fix D2] Coordonnées centre-ville en dur des 8 villes du corpus. Sert de
+# fallback fiable et instantané quand Nominatim échoue (403 IP partagée HF,
+# rate-limit, réseau). Ne couvre QUE le TOP-8 : hors de cette liste, le caller
+# retombe sur Nominatim. Volontairement dupliqué de scripts/cities.py pour
+# éviter un import cross-package (même parti pris que app.py).
+CITIES_TOP8 = {
+    "paris":      (48.8566, 2.3522),
+    "lyon":       (45.7640, 4.8357),
+    "marseille":  (43.2965, 5.3698),
+    "toulouse":   (43.6047, 1.4442),
+    "nantes":     (47.2184, -1.5536),
+    "bordeaux":   (44.8378, -0.5792),
+    "lille":      (50.6292, 3.0573),
+    "strasbourg": (48.5734, 7.7521),
+}
+
+
+def _normalize_city(city: str) -> str:
+    """Minuscule + suppression des accents (NFKD) pour matching robuste."""
+    norm = unicodedata.normalize("NFKD", city.strip().lower())
+    return "".join(c for c in norm if not unicodedata.combining(c))
+
+
+def lookup_top8(city: str) -> Optional[Tuple[float, float]]:
+    """Lookup local des 8 métropoles couvertes par le dataset.
+
+    Insensible à la casse et aux accents. Retourne None si la ville n'est pas
+    dans le TOP-8 — le caller doit alors fallback sur Nominatim ou marquer la
+    ville comme non géocodée.
+
+    Args:
+        city: nom de ville libre (ex. "Paris", "NANTES", "Bordeaux").
+
+    Returns:
+        (lat, lng) si la ville est dans le TOP-8, sinon None.
+    """
+    if not city or not city.strip():
+        return None
+    return CITIES_TOP8.get(_normalize_city(city))
+
+
 def geocode_city(city: str, country_code: str = "fr") -> Optional[Tuple[float, float]]:
     """Convertit un nom de ville en (latitude, longitude) via Nominatim.
 
@@ -188,6 +233,13 @@ def geocode_city(city: str, country_code: str = "fr") -> Optional[Tuple[float, f
     """
     if not city or not city.strip():
         return None
+
+    # 0. [fix D2] Fallback TOP-8 prioritaire : instantané et fiable, court-circuite
+    #    Nominatim pour les 8 métropoles du corpus (robustesse aux 403 en prod).
+    top8 = lookup_top8(city)
+    if top8 is not None:
+        logger.info(f"Géocodage top8 hit : {city} → ({top8[0]:.2f}, {top8[1]:.2f})")
+        return top8
 
     # 1. Cache lookup
     cache = _get_cache()
@@ -217,23 +269,23 @@ def geocode_city(city: str, country_code: str = "fr") -> Optional[Tuple[float, f
         resp.raise_for_status()
         results = resp.json()
     except requests.RequestException as e:
-        logger.warning(f"Échec Nominatim pour '{city}' : {e}")
+        logger.warning(f"Géocodage échoué : {city} (Nominatim erreur : {e})")
         return None
 
     if not results:
-        logger.info(f"Aucun résultat Nominatim pour '{city}'")
+        logger.info(f"Géocodage échoué : {city} (Nominatim None)")
         return None
 
     try:
         lat = float(results[0]["lat"])
         lng = float(results[0]["lon"])
     except (KeyError, ValueError, TypeError) as e:
-        logger.warning(f"Réponse Nominatim mal formée pour '{city}' : {e}")
+        logger.warning(f"Géocodage échoué : {city} (réponse Nominatim mal formée : {e})")
         return None
 
     # 4. Mise en cache et retour
     cache.set(city, lat, lng)
-    logger.info(f"Géocodage '{city}' → ({lat:.4f}, {lng:.4f})")
+    logger.info(f"Géocodage Nominatim : {city} → ({lat:.4f}, {lng:.4f})")
     return (lat, lng)
 
 

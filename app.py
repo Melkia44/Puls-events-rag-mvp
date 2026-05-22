@@ -45,6 +45,18 @@ if not os.getenv("MISTRAL_API_KEY"):
     print(f"⚠️  .env non chargé ou MISTRAL_API_KEY manquant. Chemin tenté : {_ENV_PATH}")
 
 # ============================================================================
+# Imports==============
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, verbose=True)
+
+if not os.getenv("MISTRAL_API_KEY"):
+    print(f"⚠️  .env non chargé ou MISTRAL_API_KEY manquant. Chemin tenté : {_ENV_PATH}")
+
+# ============================================================================
 # Imports
 # ============================================================================
 import logging
@@ -652,7 +664,15 @@ def select_user(name: str, city: str) -> Tuple[Dict, Dict, str, str]:
             LTM.set_user_city(user_id, city_to_display, coords[0], coords[1])
             logger.info(f"Profil '{name}' : ville '{city_to_display}' géocodée et persistée")
         else:
-            logger.warning(f"Ville '{city_to_display}' non géocodable, non persistée")
+            # [fix D2] Dégradation gracieuse : on persiste le NOM de ville même
+            # sans coords (lat/lng=NULL), plutôt que de sauter l'UPDATE. Évite le
+            # bug « ville figée » quand Nominatim échoue (403 prod). Le filtre géo
+            # reste inactif tant qu'on n'a pas de coordonnées.
+            LTM.set_user_city(user_id, city_to_display, None, None)
+            logger.warning(
+                f"Ville {city_to_display} persistée sans coordonnées — "
+                f"filtre géographique inactif"
+            )
     else:
         stored = LTM.get_user_city(user_id)
         if stored:
