@@ -503,15 +503,18 @@ def rag_response(
     user_message: str,
     short_term: ShortTermMemory,
     user_id: Optional[int],
-) -> Tuple[str, List, Optional[Dict]]:
+) -> Tuple[str, List, Optional[Dict], Optional[float]]:
     """Pipeline RAG : retrieval → [filtre géo] → prompt → Mistral.
 
-    Retourne (texte, docs_finaux, geo_info).
+    Retourne (texte, docs_finaux, geo_info, top_l2).
+    top_l2 = distance L2 du meilleur document sur le chemin non-géo (None
+    sinon) — exposée pour LOG/calibration du fallback routeur (fix D3-2).
     """
     if VECTOR_STORE is None or LLM is None:
         return ("⚠️ Erreur de configuration.", [], None)
 
     geo_target = _resolve_geo_target(user_message, user_id)
+    top_l2: Optional[float] = None  # [fix D3-2] distance L2 top-1 (chemin non-géo)
 
     if geo_target is not None:
         candidates = VECTOR_STORE.similarity_search(user_message, k=RETRIEVER_K_GEO)
@@ -543,7 +546,13 @@ def rag_response(
         # (sinon 5 docs ne suffisent pas à structurer une comparaison)
         is_multi, _ = _detect_multi_city_query(user_message)
         k = RETRIEVER_K * 2 if is_multi else RETRIEVER_K  # 10 vs 5
-        docs = VECTOR_STORE.similarity_search(user_message, k=k)
+        # [fix D3-2] Variante _with_score sur le chemin NON-géo (= celui qui
+        # passe par le routeur LLM, Cas B de respond()). On récupère la
+        # distance L2 du top-1 pour la LOGUER et calibrer empiriquement le
+        # seuil de fallback. Comportement docs inchangé (on extrait le [0]).
+        scored = VECTOR_STORE.similarity_search_with_score(user_message, k=k)
+        docs = [d for d, _ in scored]
+        top_l2 = scored[0][1] if scored else None
         geo_info = None
         if is_multi:
             logger.info(f"Multi-villes : top-K élargi à {k} (sans filtre géo)")
@@ -568,7 +577,7 @@ def rag_response(
         prompt,
         config={"callbacks": [LANGFUSE_HANDLER]} if LANGFUSE_HANDLER else {},
     )
-    return (response.content, docs, geo_info)
+    return (response.content, docs, geo_info, top_l2)
 
 
 def trigger_preference_extraction(short_term: ShortTermMemory, user_id: int, session_id: int) -> int:
@@ -733,7 +742,7 @@ def respond(
             response_clean, response_with_extras = _run_web_agent(message, route_reason)
         else:
             # Étape 2 — Pipeline RAG complet (D1 + D2)
-            response_clean, sources, geo_info = rag_response(message, short_term, user_id)
+            response_clean, sources, geo_info, top_l2 = rag_response(message, short_term, user_id)
 
             # Étape 3 — Décider a posteriori si fallback Web nécessaire
             kept_count = (geo_info or {}).get("kept", len(sources) if sources else 0)
@@ -753,6 +762,12 @@ def respond(
             # routeur LLM (peu importe kept_count). Le routeur tranche
             # RAG vs Web selon la nature de la question (actu, billetterie…).
             elif not is_geo_query and LLM_ROUTER is not None:
+                # [fix D3-2] On LOGUE la distance L2 top-1 pour calibrer
+                # empiriquement le seuil de fallback, mais on ne la passe PAS
+                # encore à route_to_rag_or_web (formule de normalisation à
+                # valider sur cet index — risque de forcer web sur tout).
+                if top_l2 is not None:
+                    logger.info(f"D3 retrieval top_l2={top_l2:.4f}")
                 llm_decision, llm_reason = route_to_rag_or_web(
                     message,
                     llm_router=LLM_ROUTER,

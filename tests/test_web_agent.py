@@ -22,6 +22,8 @@ from utils.web_agent import (
     web_search_filtered,
     route_to_rag_or_web,
     _FORCE_WEB_REGEX,
+    _FORCE_WEB_PROPERNOUN_REGEX,
+    ROUTER_PROMPT_TEMPLATE,
 )
 
 
@@ -141,6 +143,55 @@ class TestRouter:
         )
         assert decision == "rag"
         assert reason == "llm_error"
+
+    # ── Fix D3-2 — triggers « nom propre » (regex sensible à la casse) ──────
+
+    @pytest.mark.parametrize("question", [
+        "Y'a-t-il un concert de Stromae prochainement ?",
+        "Spectacle d'Aya Nakamura à Paris",
+        "Tournée de Taylor Swift en France",
+        "Festival de Cannes 2026",
+    ])
+    def test_trigger_matches_named_person(self, question):
+        """Nom propre + terme événementiel → web via trigger_propernoun.
+
+        Testé via route_to_rag_or_web (la regex nom propre est volontairement
+        séparée de _FORCE_WEB_REGEX, cf. fix D3-2).
+        """
+        decision, reason = route_to_rag_or_web(question, llm_router=None)
+        assert decision == "web", f"Devrait router web : {question!r}"
+        assert reason == "trigger_propernoun"
+
+    @pytest.mark.parametrize("question", [
+        "Concert à Nantes ce week-end",
+        "Spectacle de théâtre pour enfants",
+        "Festival de jazz à Bordeaux",   # 'jazz' minuscule, pas un nom propre
+        "Expo de peinture contemporaine",
+    ])
+    def test_trigger_does_not_match_generic(self, question):
+        """Questions génériques sans nom propre → PAS de trigger_propernoun."""
+        assert _FORCE_WEB_PROPERNOUN_REGEX.search(question) is None, \
+            f"Ne devrait PAS matcher : {question!r}"
+        # Sans LLM ni trigger, on reste sur RAG (sûr).
+        decision, reason = route_to_rag_or_web(question, llm_router=None)
+        assert decision == "rag"
+        assert reason != "trigger_propernoun"
+
+    def test_keyword_triggers_priority_over_propernoun(self):
+        """Un trigger mot-clé reste prioritaire (raison trigger_keyword)."""
+        # "billet" + nom propre : le mot-clé court-circuite en premier.
+        decision, reason = route_to_rag_or_web(
+            "Où acheter des billets pour Stromae à Paris ?",
+            llm_router=None,
+        )
+        assert decision == "web"
+        assert reason == "trigger_keyword"
+
+    def test_router_prompt_v3_has_named_person_rule(self):
+        """Le prompt v3 explicite la règle 'nom propre' et les limites catalogue."""
+        assert "NOMMÉMENT" in ROUTER_PROMPT_TEMPLATE
+        assert "tournées nationales" in ROUTER_PROMPT_TEMPLATE
+        assert "OpenAgenda" in ROUTER_PROMPT_TEMPLATE
 
 
 # ============================================================================

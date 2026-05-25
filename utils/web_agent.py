@@ -447,30 +447,74 @@ _FORCE_WEB_TRIGGERS = [
 _FORCE_WEB_REGEX = re.compile("|".join(_FORCE_WEB_TRIGGERS), re.IGNORECASE)
 
 
+# ── Fix D3-2 (mai 2026) — triggers « nom propre » sensibles à la casse ──────
+# Capture les questions citant nommément un artiste/groupe/personnalité, que
+# le catalogue OpenAgenda ne couvre pas (tournées nationales). Ex : "concert de
+# Stromae", "Aya Nakamura à Paris".
+#
+# Pourquoi une regex SÉPARÉE et NON dans _FORCE_WEB_TRIGGERS : ces patterns
+# reposent sur l'ancre majuscule [A-ZÀ-Ý] pour détecter un nom propre. Or
+# _FORCE_WEB_REGEX est compilé avec re.IGNORECASE, qui ferait matcher cette
+# classe sur des minuscules ("concert de jazz" → faux positif). On compile donc
+# ici SANS IGNORECASE.
+#
+# Deux ajustements vs le brief D3-2 (assumés, conformes à la spec des tests) :
+#   1. Mots événementiels rendus tolérants à la casse via [Cc]… : sans
+#      IGNORECASE, "concert" minuscule ne matcherait pas "Spectacle"/"Festival"
+#      en début de phrase (majuscule).
+#   2. Pattern 2 ("Nom à Ville") doté d'un negative-lookahead excluant les noms
+#      communs d'événements : sinon "Concert à Nantes" (mot commun capitalisé +
+#      ville) matcherait à tort et casserait test_trigger_does_not_match_generic.
+_FORCE_WEB_PROPERNOUN_TRIGGERS = [
+    # "concert de Stromae", "Spectacle d'Aya Nakamura", "Tournée de Taylor Swift",
+    # "Festival de Cannes" — terme événementiel + (de|du|d') + nom propre (Maj).
+    r"(?:[Cc]oncert|[Ss]pectacle|[Tt]ourn[ée]e|[Vv]enue|[Ss]how|[Ff]estival)\s+(?:de|du|d['’])\s+[A-ZÀ-Ý]",
+    # "Stromae à Paris", "Aya Nakamura en France" — nom propre + préposition de
+    # lieu + ville couverte/France. Le lookahead exclut les noms communs
+    # d'événements capitalisés (sinon "Concert à Nantes" matcherait).
+    r"\b(?!(?:[Cc]oncert|[Ss]pectacle|[Ff]estival|[Ee]xpo|[Ee]xposition|[Tt]ourn[ée]e|[Ss]oir[ée]e|[Ee]v[ée]nement|[Rr]epr[ée]sentation)\b)"
+    r"[A-ZÀ-Ý][a-zà-ÿ]+(?:\s+[A-ZÀ-Ý][a-zà-ÿ]+)?\s+(?:à|en|au|aux)\s+"
+    r"(?:Paris|Lyon|Marseille|Toulouse|Nantes|Bordeaux|Lille|Strasbourg|France)",
+]
+_FORCE_WEB_PROPERNOUN_REGEX = re.compile("|".join(_FORCE_WEB_PROPERNOUN_TRIGGERS))
+
+
 # Prompt court pour Mistral Small (~200 tokens entrée, ~10 sortie)
-# v2 — prompt prescriptif RAG-by-default après debug D3-1 (mai 2026)
-# Le routeur avait tendance à sur-réagir aux références temporelles relatives
-# ("ce week-end") en pensant qu'il fallait du temps réel. Le nouveau prompt
-# est explicite sur le périmètre du catalogue (couvre 6 mois, réindexé
-# quotidiennement) pour cadrer la décision.
+# v3 — fix D3-2 (mai 2026) : explicite les limites réelles du catalogue
+# OpenAgenda (qui ne couvre PAS les tournées nationales d'artistes majeurs)
+# et durcit la règle 1 (nom propre cité → web). Le prompt v2 biaisait trop
+# vers RAG en présentant le catalogue comme exhaustif.
 ROUTER_PROMPT_TEMPLATE = """Tu es un routeur pour un chatbot d'événements culturels couvrant 8 grandes villes françaises (Paris, Lyon, Marseille, Toulouse, Nantes, Bordeaux, Lille, Strasbourg).
 
 Réponds UNIQUEMENT par "RAG" ou "WEB", rien d'autre.
 
-CONTEXTE :
-- Le catalogue OpenAgenda contient les événements culturels (concerts, expos, spectacles, festivals) à venir dans ces villes sur les 6 prochains mois, réindexé quotidiennement.
-- Les références temporelles relatives ("ce soir", "ce week-end", "cette semaine", "en juin", "cet été") sont entièrement couvertes par le catalogue.
-- Le catalogue connaît les lieux, dates, horaires, descriptions et liens des événements.
+CONTEXTE PRÉCIS DU CATALOGUE :
+- Source unique : OpenAgenda (agendas culturels locaux publiés par les institutions et lieux des 8 villes).
+- Couvre : événements LOCAUX publiés à l'avance par les structures culturelles (musées, salles de concert municipales, théâtres, festivals associatifs, médiathèques, etc.).
+- NE COUVRE PAS : les tournées nationales d'artistes majeurs (chanteurs, humoristes, têtes d'affiche internationales), les dates annoncées dans la presse mais non publiées sur OpenAgenda, l'état des billetteries.
 
-Réponds "RAG" pour :
-- Toute question sur des événements culturels publics (concerts, expos, spectacles, festivals), même avec référence temporelle relative
-- Demandes de recommandations ou personnalisation
-- Questions sur lieux culturels, dates ou descriptions d'événements
+RÈGLES STRICTES — RÉPONDS "WEB" SI L'UNE DES CONDITIONS SUIVANTES EST VRAIE :
+1. La question cite NOMMÉMENT un artiste, un groupe, une personnalité, ou un titre de tournée/spectacle commercial.
+2. La question porte sur la disponibilité ou l'achat de billets, ou l'état d'une billetterie.
+3. La question porte sur une actualité ou une annonce récente (< 1 semaine).
+4. La question porte sur un événement dans une ville hors des 8 couvertes (Paris, Lyon, Marseille, Toulouse, Nantes, Bordeaux, Lille, Strasbourg).
+5. La question ne précise aucune ville ET ne précise aucun thème, mais cite un nom propre.
 
-Réponds "WEB" UNIQUEMENT pour :
-- Disponibilité de billets, ouverture de billetterie, état "complet"
-- Actualités médiatiques très récentes (< 1 semaine) ou annonces de presse
-- Événements explicitement hors des 8 villes couvertes
+SINON, RÉPONDS "RAG" :
+- Recommandations par thème ou ambiance dans une des 8 villes (jazz, expo contemporaine, théâtre jeune public...)
+- Questions sur "ce week-end", "cette semaine", "en juin" sans nom d'artiste cité
+- Personnalisation selon profil
+- Questions sur les lieux culturels locaux
+
+EXEMPLES :
+- "Concerts de jazz à Nantes ce week-end" → RAG
+- "Expo d'art contemporain à Bordeaux" → RAG
+- "Concert de Stromae prochainement" → WEB (règle 1 : nom propre)
+- "Aya Nakamura en tournée" → WEB (règle 1)
+- "Taylor Swift à Paris" → WEB (règle 1)
+- "Spectacle de Florence Foresti à Lyon" → WEB (règle 1)
+- "Billetterie du festival Hellfest" → WEB (règle 2)
+- "Concert à Marseille en juillet" → RAG
 
 Question : "{question}"
 
@@ -496,6 +540,10 @@ def route_to_rag_or_web(
     # 1. Triggers explicites (court-circuit performant)
     if _FORCE_WEB_REGEX.search(question):
         return "web", "trigger_keyword"
+    # 1bis. [fix D3-2] Triggers « nom propre » (regex sensible à la casse).
+    # Raison distincte pour distinguer les deux voies en analyse de logs.
+    if _FORCE_WEB_PROPERNOUN_REGEX.search(question):
+        return "web", "trigger_propernoun"
 
     # 2. Fallback retrieval pauvre (court-circuit aussi)
     if retrieval_count is not None and retrieval_count < 3:
