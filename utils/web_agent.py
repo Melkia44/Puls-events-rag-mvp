@@ -609,8 +609,16 @@ class PulsWebAgent:
         self.whitelist = whitelist
         self.brave_client = brave_client or BraveSearchClient()
 
-    def run(self, question: str) -> WebAgentResponse:
-        """Exécute la recherche web et synthétise une réponse citée."""
+    def run(self, question: str, user_city: Optional[str] = None) -> WebAgentResponse:
+        """Exécute la recherche web et synthétise une réponse citée.
+
+        Args:
+            question: question de l'utilisateur.
+            user_city: ville courante de l'utilisateur. Utilisée UNIQUEMENT
+                pour personnaliser le message d'échec (0 source filtrée) — elle
+                n'influence PAS la query Brave (la reformulation géo de la
+                recherche reste un chantier V2, cf. risque résiduel).
+        """
         # 1. Recherche filtrée
         sources = web_search_filtered(
             question,
@@ -619,13 +627,20 @@ class PulsWebAgent:
         )
 
         if not sources:
+            # Contexte géo du message d'échec : ville utilisateur si dispo,
+            # sinon mention générique des 8 villes (le MVP n'est plus
+            # mono-Nantes). .strip() pour ignorer un éventuel whitespace BDD.
+            if user_city and user_city.strip():
+                location_hint = f"({user_city.strip()} et environs)"
+            else:
+                location_hint = "(8 grandes villes françaises couvertes)"
             return WebAgentResponse(
                 text=(
-                    "Je n'ai pas trouvé de source fiable dans mes domaines de "
-                    "confiance (presse locale, billetteries officielles, lieux "
-                    "culturels nantais) pour répondre à cette question. "
-                    "Je peux essayer de répondre sur la base du catalogue "
-                    "OpenAgenda si tu reformules ta question."
+                    f"Je n'ai pas trouvé de source fiable dans mes domaines de "
+                    f"confiance — presse régionale, billetteries officielles, "
+                    f"agendas culturels locaux {location_hint} — pour répondre "
+                    f"à cette question. Je peux essayer de répondre sur la base "
+                    f"du catalogue OpenAgenda si tu reformules ta question."
                 ),
                 sources=[],
                 source_search="none",

@@ -18,7 +18,9 @@ import pytest
 from utils.web_agent import (
     DomainWhitelist,
     BraveSearchClient,
+    PulsWebAgent,
     WebResult,
+    WebAgentResponse,
     web_search_filtered,
     route_to_rag_or_web,
     _FORCE_WEB_REGEX,
@@ -380,3 +382,133 @@ class TestBraveLive:
         results = client.search("Nantes culture concert")
         assert len(results) > 0
         assert "url" in results[0] or "title" in results[0]
+
+
+# ============================================================================
+# Test 5 — Personnalisation géo du message d'échec web (D2 → propagation
+#          user_city). Cf. patch user_city : PulsWebAgent.run(user_city=…).
+# ============================================================================
+
+class TestFailureMessageLocation:
+    """Message d'échec (0 source filtrée) personnalisé par la ville utilisateur.
+
+    Note sur le mock : on patche `web_search_filtered` pour renvoyer [] ; le
+    pipeline court-circuite alors AVANT l'appel LLM (la branche `if not
+    sources:` retourne immédiatement). Le LLM mocké n'est donc jamais invoqué
+    — on l'assert explicitement, ce qui rend la couverture du message d'échec
+    déterministe et hors-réseau.
+    """
+
+    def _agent(self, whitelist):
+        """PulsWebAgent avec LLM + Brave mockés (jamais sollicités ici)."""
+        return PulsWebAgent(
+            llm_response=MagicMock(),
+            whitelist=whitelist,
+            brave_client=MagicMock(spec=BraveSearchClient),
+        )
+
+    def test_user_city_personalises_failure_message(self, whitelist_test, monkeypatch):
+        """user_city renseignée → mention '(<ville> et environs)'."""
+        monkeypatch.setattr(
+            "utils.web_agent.web_search_filtered", lambda *a, **k: []
+        )
+        agent = self._agent(whitelist_test)
+        resp = agent.run("un concert ce soir ?", user_city="Bordeaux")
+
+        assert "(Bordeaux et environs)" in resp.text
+        assert resp.sources == []
+        assert resp.source_search == "none"
+        # Le court-circuit 0-source doit éviter tout appel LLM.
+        agent.llm.invoke.assert_not_called()
+
+    def test_no_user_city_uses_generic_hint(self, whitelist_test, monkeypatch):
+        """user_city=None → mention générique des 8 villes, pas de 'environs'."""
+        monkeypatch.setattr(
+            "utils.web_agent.web_search_filtered", lambda *a, **k: []
+        )
+        agent = self._agent(whitelist_test)
+        resp = agent.run("un concert ce soir ?")
+
+        assert "8 grandes villes françaises couvertes" in resp.text
+        assert "et environs" not in resp.text
+
+    def test_empty_user_city_falls_back_to_generic(self, whitelist_test, monkeypatch):
+        """Cas edge : user_city='' (chaîne vide) → générique, pas '( et environs)'."""
+        monkeypatch.setattr(
+            "utils.web_agent.web_search_filtered", lambda *a, **k: []
+        )
+        agent = self._agent(whitelist_test)
+        resp = agent.run("un concert ce soir ?", user_city="")
+
+        assert "8 grandes villes françaises couvertes" in resp.text
+        assert "et environs" not in resp.text
+
+    def test_whitespace_user_city_falls_back_to_generic(self, whitelist_test, monkeypatch):
+        """Cas edge : whitespace pur remonté de la BDD → .strip() → générique."""
+        monkeypatch.setattr(
+            "utils.web_agent.web_search_filtered", lambda *a, **k: []
+        )
+        agent = self._agent(whitelist_test)
+        resp = agent.run("un concert ce soir ?", user_city="   ")
+
+        assert "8 grandes villes françaises couvertes" in resp.text
+        assert "et environs" not in resp.text
+
+
+# ============================================================================
+# Test 6 — Propagation override > profil dans app._run_web_agent.
+# ============================================================================
+
+class TestRunWebAgentCityPropagation:
+    """Résolution de la ville dans app._run_web_agent (priorité override>profil).
+
+    On importe `app` (init module-level dégradée en singletons réels mais ici
+    intégralement re-patchés) et on capture l'argument `user_city` réellement
+    transmis à PulsWebAgent.run().
+    """
+
+    def _capture_city(self, message, user_id, profile_return):
+        """Exécute app._run_web_agent en capturant le user_city transmis à run()."""
+        import app
+
+        captured = {}
+
+        def fake_run(question, user_city=None):
+            captured["user_city"] = user_city
+            return WebAgentResponse(text="ok", sources=[], source_search="none")
+
+        with patch.object(app, "WEB_AGENT") as mock_agent, \
+                patch.object(app, "LTM") as mock_ltm:
+            mock_agent.run.side_effect = fake_run
+            mock_ltm.get_user_city.return_value = profile_return
+            app._run_web_agent(message, "test_reason", user_id=user_id)
+        return captured.get("user_city"), mock_ltm
+
+    def test_override_in_message_wins_over_profile(self):
+        """Ville citée dans la requête courante > ville du profil."""
+        city, mock_ltm = self._capture_city(
+            "des concerts à Bordeaux ce week-end",
+            user_id=1,
+            profile_return={"city": "Paris", "lat": 48.85, "lng": 2.35},
+        )
+        assert city == "Bordeaux"
+        # L'override court-circuite la lecture du profil (économie + priorité).
+        mock_ltm.get_user_city.assert_not_called()
+
+    def test_profile_city_used_when_no_override(self):
+        """Sans ville dans la requête → on retombe sur la ville du profil."""
+        city, _ = self._capture_city(
+            "y a-t-il encore des billets pour ce soir ?",
+            user_id=7,
+            profile_return={"city": "Lyon", "lat": 45.76, "lng": 4.84},
+        )
+        assert city == "Lyon"
+
+    def test_none_when_no_override_and_no_profile(self):
+        """Ni override ni ville profil → None (fallback générique côté run())."""
+        city, _ = self._capture_city(
+            "y a-t-il encore des billets pour ce soir ?",
+            user_id=7,
+            profile_return=None,  # utilisateur sans ville stockée
+        )
+        assert city is None

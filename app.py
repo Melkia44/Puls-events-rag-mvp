@@ -382,18 +382,37 @@ def _format_web_block(web_response, route_reason: str) -> str:
     return badge + panel
 
 
-def _run_web_agent(message: str, route_reason: str) -> Tuple[str, str]:
+def _run_web_agent(
+    message: str, route_reason: str, user_id: Optional[int] = None
+) -> Tuple[str, str]:
     """Exécute l'agent web et formate la réponse.
 
     Centralise les 3 points de bascule Web de respond() (trigger explicite,
     requête géo sans résultat, routeur LLM) pour qu'une évolution du
     formatage web n'ait qu'un seul site à modifier.
 
+    La résolution de la ville utilisateur (pour personnaliser le message
+    d'échec web) est faite ici une seule fois, plutôt qu'aux 3 call-sites.
+    Priorité : override explicite dans la requête courante ("à Bordeaux")
+    > ville du profil LTM. Si aucune des deux n'est disponible, on transmet
+    None : PulsWebAgent.run() bascule alors sur la mention générique des
+    8 villes (jamais de "(None et environs)").
+
     Returns:
         (response_clean, response_with_extras)
     """
     logger.info(f"D3 routage : web ({route_reason})")
-    web_resp = WEB_AGENT.run(message)
+    override = extract_location_override(message)
+    if override:
+        user_city = override
+    else:
+        profile = (
+            LTM.get_user_city(user_id)
+            if (user_id is not None and LTM is not None)
+            else None
+        )
+        user_city = profile.get("city") if profile else None
+    web_resp = WEB_AGENT.run(message, user_city=user_city)
     return web_resp.text, web_resp.text + _format_web_block(web_resp, route_reason)
 
 
@@ -739,7 +758,7 @@ def respond(
 
         if _FORCE_WEB_REGEX.search(message) and WEB_AGENT is not None:
             decision, route_reason = "web", "trigger_keyword"
-            response_clean, response_with_extras = _run_web_agent(message, route_reason)
+            response_clean, response_with_extras = _run_web_agent(message, route_reason, user_id)
         else:
             # Étape 2 — Pipeline RAG complet (D1 + D2)
             response_clean, sources, geo_info, top_l2 = rag_response(message, short_term, user_id)
@@ -756,7 +775,7 @@ def respond(
             # → on bascule Web plutôt que de mentir avec des events Nantes.
             if is_geo_query and strict_count == 0 and WEB_AGENT is not None:
                 decision, route_reason = "web", f"d2_strict_in_radius=0_city={target_city}"
-                response_clean, response_with_extras = _run_web_agent(message, route_reason)
+                response_clean, response_with_extras = _run_web_agent(message, route_reason, user_id)
 
             # Cas B : requête NON-géo → on consulte systématiquement le
             # routeur LLM (peu importe kept_count). Le routeur tranche
@@ -775,7 +794,7 @@ def respond(
                 )
                 if llm_decision == "web" and WEB_AGENT is not None:
                     decision, route_reason = "web", f"llm_router_non_geo (kept={kept_count})"
-                    response_clean, response_with_extras = _run_web_agent(message, route_reason)
+                    response_clean, response_with_extras = _run_web_agent(message, route_reason, user_id)
                 else:
                     # Le LLM confirme RAG → on garde la réponse RAG
                     logger.info(f"D3 routage : rag (llm_router_non_geo, kept={kept_count})")
