@@ -220,11 +220,13 @@ Le script génère un CSV horodaté avec faithfulness + answer_relevancy par que
 Si tu veux **reconstruire l'index FAISS** (au lieu d'utiliser celui livré via LFS) :
 
 ```bash
-python scripts/ingest.py
+python scripts/ingest_top8.py
 # Source : OpenAgenda API (gratuite, pas de clé requise)
 # Couvre 8 métropoles (Paris, Lyon, Marseille, Toulouse, Nantes, Bordeaux, Lille, Strasbourg)
-# Sortie : ~1568 vecteurs, 100% géolocalisés
+# Sortie : ~7024 vecteurs (~5622 événements uniques), 100% géolocalisés
 # Durée : ~5-10 min (rate-limited côté OpenAgenda)
+#
+# (scripts/ingest.py seul = Nantes uniquement, défaut GEO_CITY ; rétro-compat P11)
 ```
 
 ---

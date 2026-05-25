@@ -40,7 +40,7 @@ short_description: Chatbot RAG de découverte d'événements culturels
 |--------|--------|
 | UI | Gradio 5.50 |
 | LLM | Mistral La Plateforme (Large pour synthèse, Small pour routing) |
-| Vector DB | FAISS local (1568 vecteurs, 100% géolocalisés) |
+| Vector DB | FAISS local (7024 vecteurs / 5622 événements, 8 métropoles, 100% géolocalisés) |
 | Persistance | PostgreSQL Supabase (Session Pooler, eu-west-3 Paris) |
 | Embeddings | Mistral `mistral-embed` |
 | Recherche web | Brave Search API + smolagents |
